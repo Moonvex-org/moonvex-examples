@@ -1,6 +1,6 @@
 # Accept crypto payments in ASP.NET Core
 
-A Moonvex integration for ASP.NET Core (Minimal API, .NET 8): a named HttpClient creates the payment, and the webhook reads the whole body, verifies the HMACSHA256 signature and marks the order through EF Core exactly once.
+A Moonvex integration for ASP.NET Core (Minimal API, .NET 8): a named HttpClient creates a checkout where the customer picks the coin, and the webhook reads the whole body, verifies the HMACSHA256 signature and marks the order through EF Core exactly once.
 
 Full guide with explanations: https://moonvex.org/en/guides/csharp-aspnet?utm_source=github&utm_medium=repo&utm_campaign=csharp-aspnet
 
@@ -20,11 +20,11 @@ File: [`01-get-an-api-key-and-a-webhook-secret.json`](./01-get-an-api-key-and-a-
 }
 ```
 
-## 2. Create a payment with HttpClient
+## 2. Create a checkout with HttpClient
 
-The named moonvex client is registered with AddHttpClient, a base address and the Bearer key. The amount is formatted with CultureInfo.InvariantCulture; otherwise a server with a comma-decimal locale would send 25,00.
+The named moonvex client is registered with AddHttpClient, a base address and the Bearer key. The request has no network, so Moonvex creates a checkout where the customer picks the coin and network. description is shown as “You are paying for”, returnUrl (https only) is where the Back buttons lead. The amount is formatted with CultureInfo.InvariantCulture; otherwise a server with a comma-decimal locale would send 25,00.
 
-File: [`02-create-a-payment-with-httpclient.cs`](./02-create-a-payment-with-httpclient.cs)
+File: [`02-create-a-checkout-with-httpclient.cs`](./02-create-a-checkout-with-httpclient.cs)
 
 ```csharp
 // Program.cs
@@ -56,24 +56,25 @@ app.MapPost("/orders/{id:long}/pay", async (long id, AppDb db, IHttpClientFactor
             orderId = id.ToString(CultureInfo.InvariantCulture),
             // decimal → "25.00" with a dot in any culture
             amount = order.Total.ToString("0.00", CultureInfo.InvariantCulture),
-            currency = "USDT",
-            network = "TRON",
+            currency = "USD", // no network: the customer picks the coin on the checkout page
+            description = "Order #" + id, // shown as “You are paying for”
+            returnUrl = "https://shop.example.com/orders/" + id, // the Back buttons
         }),
     };
     request.Headers.Add("Idempotency-Key", "order-" + id + "-1");
 
     using var response = await http.CreateClient("moonvex").SendAsync(request);
-    var payment = await response.Content.ReadFromJsonAsync<JsonElement>();
+    var checkout = await response.Content.ReadFromJsonAsync<JsonElement>();
     if (!response.IsSuccessStatusCode)
-        return Results.Problem(payment.GetProperty("error").GetProperty("code").GetString(), statusCode: 502);
+        return Results.Problem(checkout.GetProperty("error").GetProperty("code").GetString(), statusCode: 502);
 
-    return Results.Redirect(payment.GetProperty("paymentUrl").GetString()!);
+    return Results.Redirect(checkout.GetProperty("paymentUrl").GetString()!);
 });
 ```
 
 ## 3. Send the customer to paymentUrl
 
-paymentUrl is a hosted payment page: the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Open it with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook or the status from GET /v1/payments/:id. Results.Redirect(url) sends the customer to the payment page.
+paymentUrl is the Moonvex checkout page: the customer picks the coin and network, then sees the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Your description is shown as “You are paying for”, and the Back and “Back to the shop” buttons lead to returnUrl. If you know the customer's language, add ?lang=ru, ?lang=uk or ?lang=en to paymentUrl; otherwise the page picks the language itself. Open the page with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook. Results.Redirect(url) sends the customer to the payment page.
 
 ## 4. Receive the webhook and verify the signature
 
@@ -101,6 +102,7 @@ app.MapPost("/moonvex/webhook", async (HttpRequest request, AppDb db, IConfigura
         var orderId = long.Parse(ev.GetProperty("data").GetProperty("orderId").GetString()!, CultureInfo.InvariantCulture);
         await OrderPayments.MarkPaidOnceAsync(db, ev.GetProperty("id").GetString()!, orderId);
     }
+    // payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
     return Results.Ok();
 });
 
@@ -139,7 +141,7 @@ static class MoonvexSignature
 
 ## 5. Mark the order paid exactly once
 
-A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. ExecuteSqlAsync returns the number of affected rows and ExecuteUpdateAsync updates the order without loading it; both come from EF Core 7+.
+A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. Events arrive for the payment the customer starts: data.id is its pay_… id and data.orderId is your order number. If the customer switches coins, the previous payment gets payment.cancelled: do not cancel the order on it while the checkout is open. ExecuteSqlAsync returns the number of affected rows and ExecuteUpdateAsync updates the order without loading it; both come from EF Core 7+.
 
 File: [`05-mark-the-order-paid-exactly-once.cs`](./05-mark-the-order-paid-exactly-once.cs)
 
@@ -177,6 +179,7 @@ Moonvex has no test network: everything runs on mainnets. The “Send test” bu
 - Do not declare a model parameter for the webhook body: after deserialisation the bytes no longer match what was signed.
 - A global authorization policy (FallbackPolicy) will block the webhook; add .AllowAnonymous() to the route.
 - Create HttpClient through IHttpClientFactory, not with new HttpClient() per request.
+- Need one fixed coin instead of the customer's choice? Add network (and asset when currency is USD) to the same object, for example network = "TRON", asset = "USDT": that is the classic payment in one coin. The checkout above is the recommended flow.
 
 ## FAQ
 
@@ -186,7 +189,7 @@ Yes. In the controller action read Request.Body into a MemoryStream as in the ex
 
 **What if the customer does not pay in time?**
 
-The payment moves to EXPIRED and you receive payment.expired. You can create a new payment for the same orderId with a new Idempotency-Key (for example, bump the attempt number at the end of the key). The payment window is set with expiresInMinutes: 5 to 1440 minutes, 30 by default.
+The checkout is valid until expiresAt; the window is set with expiresInMinutes, 5 to 1440 minutes, 30 by default. If the customer started a payment and did not pay it in time, it moves to EXPIRED and you receive payment.expired. To let them try again, create a new checkout with a new Idempotency-Key (for example, bump the attempt number at the end of the key); if the API answers DUPLICATE_ORDER, that order number is closed, so use a new orderId such as 1001-2.
 
 **Is there a test mode or a sandbox?**
 

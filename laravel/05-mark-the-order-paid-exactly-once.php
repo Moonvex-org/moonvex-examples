@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\DB;
 
 class Order extends Model
 {
-    protected $fillable = ['moonvex_payment_id', 'status'];
+    protected $fillable = ['moonvex_checkout_id', 'status'];
 
     protected $casts = ['total' => 'decimal:2'];
 

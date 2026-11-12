@@ -11,6 +11,7 @@ class MoonvexWebhooksController < ApplicationController
     if %w[payment.confirmed payment.overpaid].include?(event["type"])
       Order.mark_paid_once!(event["id"], event.dig("data", "orderId"))
     end
+    # payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
     head :ok
   end
 
@@ -30,3 +31,4 @@ end
 # config/routes.rb
 post "/moonvex/webhook", to: "moonvex_webhooks#create"
 post "/orders/:id/pay", to: "orders#pay", as: :pay_order
+resources :orders, only: :show # order_url for returnUrl

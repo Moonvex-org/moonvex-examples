@@ -1,6 +1,6 @@
 # Accept crypto payments in Go
 
-Accept USDT, BTC and other coins in a Go service using only the standard library: net/http creates the payment and receives the webhook, crypto/hmac verifies the signature, and database/sql with pgx marks the order paid exactly once.
+Accept USDT, BTC and other coins in a Go service using only the standard library: net/http creates the checkout and receives the webhook, crypto/hmac verifies the signature, and database/sql with pgx marks the order paid exactly once.
 
 Full guide with explanations: https://moonvex.org/en/guides/go?utm_source=github&utm_medium=repo&utm_campaign=go
 
@@ -18,11 +18,11 @@ export MOONVEX_WEBHOOK_SECRET=whsec_...
 export DATABASE_URL=postgres://user:pass@localhost:5432/shop
 ```
 
-## 2. Create a payment
+## 2. Create a checkout
 
-Moonvex amounts are strings, so the Amount field of the Payment struct is a string and PostgreSQL returns the total as total::text. Routes with a method and {id} come from net/http in Go 1.22+.
+The request has no network, so Moonvex creates a checkout: the customer picks the coin and network on its page. description is shown as “You are paying for”, returnUrl (https only) is where the Back buttons lead. Moonvex amounts are strings, so the Amount field of the Checkout struct is a string and PostgreSQL returns the total as total::text. Routes with a method and {id} come from net/http in Go 1.22+.
 
-File: [`02-create-a-payment.go`](./02-create-a-payment.go)
+File: [`02-create-a-checkout.go`](./02-create-a-checkout.go)
 
 ```go
 // payment.go
@@ -47,13 +47,13 @@ var (
 	httpClient = &http.Client{Timeout: 15 * time.Second}
 )
 
-type Payment struct {
-	ID         string `json:"id"`
-	Status     string `json:"status"`
+// Checkout is the response of POST /v1/payments without network
+type Checkout struct {
+	ID         string `json:"id"`     // inv_…
+	Status     string `json:"status"` // AWAITING_SELECTION
 	OrderID    string `json:"orderId"`
 	Amount     string `json:"amount"` // amounts are strings, not float64
-	Asset      string `json:"asset"`
-	Network    string `json:"network"`
+	Currency   string `json:"currency"`
 	PaymentURL string `json:"paymentUrl"`
 }
 
@@ -64,9 +64,13 @@ type apiError struct {
 	} `json:"error"`
 }
 
-func createPayment(ctx context.Context, orderID, amount string, attempt int) (*Payment, error) {
+func createCheckout(ctx context.Context, orderID, amount string, attempt int) (*Checkout, error) {
 	body, _ := json.Marshal(map[string]string{
-		"orderId": orderID, "amount": amount, "currency": "USDT", "network": "TRON",
+		"orderId":     orderID,
+		"amount":      amount,
+		"currency":    "USD",                                        // no network: the customer picks the coin on the checkout page
+		"description": "Order #" + orderID,                          // shown as “You are paying for”
+		"returnUrl":   "https://shop.example.com/orders/" + orderID, // the Back buttons
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.moonvex.org/v1/payments", bytes.NewReader(body))
 	if err != nil {
@@ -86,8 +90,8 @@ func createPayment(ctx context.Context, orderID, amount string, attempt int) (*P
 		_ = json.NewDecoder(res.Body).Decode(&e)
 		return nil, fmt.Errorf("moonvex: %s: %s", e.Error.Code, e.Error.Message)
 	}
-	var p Payment
-	return &p, json.NewDecoder(res.Body).Decode(&p)
+	var c Checkout
+	return &c, json.NewDecoder(res.Body).Decode(&c)
 }
 
 func payHandler(w http.ResponseWriter, r *http.Request) {
@@ -99,12 +103,12 @@ func payHandler(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	p, err := createPayment(r.Context(), id, total, 1)
+	c, err := createCheckout(r.Context(), id, total, 1)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	http.Redirect(w, r, p.PaymentURL, http.StatusSeeOther)
+	http.Redirect(w, r, c.PaymentURL, http.StatusSeeOther)
 }
 
 func main() {
@@ -117,7 +121,7 @@ func main() {
 
 ## 3. Send the customer to paymentUrl
 
-paymentUrl is a hosted payment page: the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Open it with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook or the status from GET /v1/payments/:id. http.Redirect(w, r, url, http.StatusSeeOther).
+paymentUrl is the Moonvex checkout page: the customer picks the coin and network, then sees the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Your description is shown as “You are paying for”, and the Back and “Back to the shop” buttons lead to returnUrl. If you know the customer's language, add ?lang=ru, ?lang=uk or ?lang=en to paymentUrl; otherwise the page picks the language itself. Open the page with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook. http.Redirect(w, r, url, http.StatusSeeOther).
 
 ## 4. Receive the webhook and verify the signature
 
@@ -207,13 +211,14 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
 	w.WriteHeader(http.StatusOK)
 }
 ```
 
 ## 5. Mark the order paid exactly once
 
-A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. RowsAffected() after INSERT … ON CONFLICT DO NOTHING: 0 means the event was seen before.
+A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. Events arrive for the payment the customer starts: data.id is its pay_… id and data.orderId is your order number. If the customer switches coins, the previous payment gets payment.cancelled: do not cancel the order on it while the checkout is open. RowsAffected() after INSERT … ON CONFLICT DO NOTHING: 0 means the event was seen before.
 
 File: [`05-mark-the-order-paid-exactly-once.go`](./05-mark-the-order-paid-exactly-once.go)
 
@@ -255,6 +260,7 @@ Moonvex has no test network: everything runs on mainnets. The “Send test” bu
 - Use string or a decimal package for amounts, never float64.
 - Give your http.Client a Timeout; the default client waits forever.
 - Never log the webhook secret or the full Authorization header.
+- Need one fixed coin instead of the customer's choice? Add network (and asset when currency is USD) to the same request, for example "network": "TRON", "asset": "USDT": that is the classic payment in one coin. The checkout above is the recommended flow.
 
 ## FAQ
 
@@ -264,7 +270,7 @@ The official SDK currently exists only for Node.js. In Go the standard library i
 
 **What if the customer does not pay in time?**
 
-The payment moves to EXPIRED and you receive payment.expired. You can create a new payment for the same orderId with a new Idempotency-Key (for example, bump the attempt number at the end of the key). The payment window is set with expiresInMinutes: 5 to 1440 minutes, 30 by default.
+The checkout is valid until expiresAt; the window is set with expiresInMinutes, 5 to 1440 minutes, 30 by default. If the customer started a payment and did not pay it in time, it moves to EXPIRED and you receive payment.expired. To let them try again, create a new checkout with a new Idempotency-Key (for example, bump the attempt number at the end of the key); if the API answers DUPLICATE_ORDER, that order number is closed, so use a new orderId such as 1001-2.
 
 **Is there a test mode or a sandbox?**
 

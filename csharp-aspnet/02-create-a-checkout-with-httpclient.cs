@@ -27,16 +27,17 @@ app.MapPost("/orders/{id:long}/pay", async (long id, AppDb db, IHttpClientFactor
             orderId = id.ToString(CultureInfo.InvariantCulture),
             // decimal → "25.00" with a dot in any culture
             amount = order.Total.ToString("0.00", CultureInfo.InvariantCulture),
-            currency = "USDT",
-            network = "TRON",
+            currency = "USD", // no network: the customer picks the coin on the checkout page
+            description = "Order #" + id, // shown as “You are paying for”
+            returnUrl = "https://shop.example.com/orders/" + id, // the Back buttons
         }),
     };
     request.Headers.Add("Idempotency-Key", "order-" + id + "-1");
 
     using var response = await http.CreateClient("moonvex").SendAsync(request);
-    var payment = await response.Content.ReadFromJsonAsync<JsonElement>();
+    var checkout = await response.Content.ReadFromJsonAsync<JsonElement>();
     if (!response.IsSuccessStatusCode)
-        return Results.Problem(payment.GetProperty("error").GetProperty("code").GetString(), statusCode: 502);
+        return Results.Problem(checkout.GetProperty("error").GetProperty("code").GetString(), statusCode: 502);
 
-    return Results.Redirect(payment.GetProperty("paymentUrl").GetString()!);
+    return Results.Redirect(checkout.GetProperty("paymentUrl").GetString()!);
 });

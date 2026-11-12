@@ -1,6 +1,6 @@
 # Accept crypto payments in Next.js
 
-A Moonvex integration for Next.js (App Router): a server Route Handler creates the payment and redirects to the payment page, and a second Route Handler receives the webhook, verifies the signature and marks the order paid.
+A Moonvex integration for Next.js (App Router): a server Route Handler creates a checkout and redirects to it, the customer picks the coin and network there, and a second Route Handler receives the webhook, verifies the signature and marks the order paid.
 
 Full guide with explanations: https://moonvex.org/en/guides/nextjs?utm_source=github&utm_medium=repo&utm_campaign=nextjs
 
@@ -19,11 +19,11 @@ MOONVEX_WEBHOOK_SECRET=whsec_...
 DATABASE_URL=postgres://user:pass@localhost:5432/shop
 ```
 
-## 2. Create a payment in a Route Handler
+## 2. Create a checkout in a Route Handler
 
-The POST handler in app/orders/[id]/pay/route.ts loads the order from the database and calls moonvex.payments.create. The API key stays on the server; the client component just submits a form with method="post".
+The POST handler in app/orders/[id]/pay/route.ts loads the order from the database and calls moonvex.checkouts.create without a network: the customer picks the coin and network on the Moonvex page. description is shown as “You are paying for”, returnUrl (https only) is where the Back buttons lead. The API key stays on the server; the client component just submits a form with method="post".
 
-File: [`02-create-a-payment-in-a-route-handler.ts`](./02-create-a-payment-in-a-route-handler.ts)
+File: [`02-create-a-checkout-in-a-route-handler.ts`](./02-create-a-checkout-in-a-route-handler.ts)
 
 ```ts
 // lib/moonvex.ts
@@ -42,18 +42,24 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const order = rows[0];
   if (!order) return new Response('not found', { status: 404 });
 
-  const payment = await moonvex.payments.create(
-    { orderId: String(order.id), amount: order.total, currency: 'USDT', network: 'TRON' },
+  const checkout = await moonvex.checkouts.create(
+    {
+      orderId: String(order.id),
+      amount: order.total,
+      currency: 'USD', // the customer picks the coin and network on the checkout page
+      description: 'Order #' + order.id, // shown as “You are paying for”
+      returnUrl: 'https://shop.example.com/orders/' + order.id, // the Back buttons
+    },
     { idempotencyKey: 'order-' + order.id + '-1' },
   );
-  // a method="post" form → 303 to the payment page
-  return NextResponse.redirect(payment.paymentUrl, 303);
+  // a method="post" form → 303 to the checkout page
+  return NextResponse.redirect(checkout.paymentUrl, 303);
 }
 ```
 
 ## 3. Send the customer to paymentUrl
 
-paymentUrl is a hosted payment page: the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Open it with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook or the status from GET /v1/payments/:id. NextResponse.redirect(url, 303) after the form opens the payment page.
+paymentUrl is the Moonvex checkout page: the customer picks the coin and network, then sees the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Your description is shown as “You are paying for”, and the Back and “Back to the shop” buttons lead to returnUrl. If you know the customer's language, add ?lang=ru, ?lang=uk or ?lang=en to paymentUrl; otherwise the page picks the language itself. Open the page with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook. NextResponse.redirect(url, 303) after the form opens the payment page.
 
 ## 4. Receive the webhook and verify the signature
 
@@ -82,13 +88,14 @@ export async function POST(req: Request) {
   if (event.type === 'payment.confirmed' || event.type === 'payment.overpaid') {
     await markOrderPaidOnce(event.id, event.data.orderId!);
   }
+  // payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
   return new Response('ok');
 }
 ```
 
 ## 5. Mark the order paid exactly once
 
-A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected.
+A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. Events arrive for the payment the customer starts: data.id is its pay_… id and data.orderId is your order number. If the customer switches coins, the previous payment gets payment.cancelled: do not cancel the order on it while the checkout is open.
 
 File: [`05-mark-the-order-paid-exactly-once.ts`](./05-mark-the-order-paid-exactly-once.ts)
 
@@ -137,16 +144,18 @@ Moonvex has no test network: everything runs on mainnets. The “Send test” bu
 - If middleware checks authentication, exclude /api/moonvex/webhook in its matcher, or Moonvex gets redirected to your login page.
 - The Edge runtime does not work for the webhook in this example: it needs node:crypto and pg. Keep runtime = 'nodejs'.
 - Do not cache the handler: dynamic = 'force-dynamic' and the POST method make sure every webhook reaches your code.
+- With next-intl or another i18n setup you know the locale: redirect to withLanguage(checkout.paymentUrl, locale) from @moonvex/node (ru, uk or en) so the checkout opens in the same language.
+- Need one fixed coin instead of the customer's choice? moonvex.payments.create with network (and asset when currency is USD), for example network: 'TRON', asset: 'USDT', still works. The checkout above is the recommended flow.
 
 ## FAQ
 
-**Can I create the payment in a Server Action?**
+**Can I create the checkout in a Server Action?**
 
-Yes: call moonvex.payments.create inside a 'use server' function and redirect(payment.paymentUrl) from next/navigation. The webhook still needs its own Route Handler.
+Yes: call moonvex.checkouts.create inside a 'use server' function and redirect(checkout.paymentUrl) from next/navigation. The webhook still needs its own Route Handler.
 
-**Why is amount in the response higher than the order price?**
+**Why is amount in the webhook higher than the order price?**
 
-The customer pays the Moonvex fee on top, so amount is the total due. Your price stays in pricing.amount, and what you receive on a full payment is in merchantAmount. Reconcile orders by orderId and pricing.amount, and show the customer amount.
+The checkout returns your price as is in amount and currency. The payment the customer starts (data in webhooks) is in the chosen coin, and its amount is the total due including the Moonvex fee on top. Your price stays in pricing.amount, and what you receive on a full payment is in merchantAmount. Reconcile orders by orderId and pricing.amount.
 
 **Is there a test mode or a sandbox?**
 

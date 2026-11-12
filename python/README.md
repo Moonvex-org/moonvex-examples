@@ -1,6 +1,6 @@
 # Accept crypto payments in Python
 
-A minimal Moonvex integration in Python with Flask and requests: create an invoice, send the customer to the payment page, receive the webhook and verify its HMAC-SHA256 signature with the standard library. Works for any WSGI app.
+A minimal Moonvex integration in Python with Flask and requests: create a checkout, send the customer to the Moonvex page where they pick the coin and network, receive the webhook and verify its HMAC-SHA256 signature with the standard library. Works for any WSGI app.
 
 Full guide with explanations: https://moonvex.org/en/guides/python?utm_source=github&utm_medium=repo&utm_campaign=python
 
@@ -18,11 +18,11 @@ export MOONVEX_SECRET_KEY=sk_live_...
 export MOONVEX_WEBHOOK_SECRET=whsec_...
 ```
 
-## 2. Create a payment
+## 2. Create a checkout
 
-POST /v1/payments with requests: Authorization: Bearer and Idempotency-Key in the headers; orderId, amount as a string, currency and network in the body. A 201 response returns the payment object with id and paymentUrl. Store the id next to your order.
+POST /v1/payments with requests: Authorization: Bearer and Idempotency-Key in the headers; orderId, amount as a string and currency (USD or a coin) in the body. Without network the API creates a checkout and the customer picks the coin and network on the Moonvex page. description is shown as “You are paying for”, returnUrl (https only) is where the Back buttons lead. A 201 response returns an object with object: "checkout", id (inv_…) and paymentUrl.
 
-File: [`02-create-a-payment.py`](./02-create-a-payment.py)
+File: [`02-create-a-checkout.py`](./02-create-a-checkout.py)
 
 ```python
 # app.py
@@ -43,21 +43,27 @@ def db() -> sqlite3.Connection:
     return conn
 
 
-def create_payment(order_id: int, amount: str, attempt: int = 1) -> dict:
+def create_checkout(order_id: int, amount: str, attempt: int = 1) -> dict:
     r = requests.post(
         API + "/v1/payments",
         headers={
             "Authorization": "Bearer " + os.environ["MOONVEX_SECRET_KEY"],
-            # a retry with the same key never creates a second invoice
+            # a retry with the same key never creates a second checkout
             "Idempotency-Key": f"order-{order_id}-{attempt}",
         },
-        json={"orderId": str(order_id), "amount": amount, "currency": "USDT", "network": "TRON"},
+        json={
+            "orderId": str(order_id),
+            "amount": amount,
+            "currency": "USD",  # no network: the customer picks the coin on the checkout page
+            "description": f"Order #{order_id}",  # shown as “You are paying for”
+            "returnUrl": f"https://shop.example.com/orders/{order_id}",  # the Back buttons
+        },
         timeout=15,
     )
-    payment = r.json()
+    checkout = r.json()
     if r.status_code >= 400:
-        raise RuntimeError(payment["error"]["code"] + ": " + payment["error"]["message"])
-    return payment
+        raise RuntimeError(checkout["error"]["code"] + ": " + checkout["error"]["message"])
+    return checkout  # {"object": "checkout", "id": "inv_…", "paymentUrl": …}
 
 
 @app.post("/orders/<int:order_id>/pay")
@@ -67,13 +73,13 @@ def pay(order_id: int):
     if order is None:
         abort(404)
     # total is stored as TEXT "25.00", so the amount is sent as a string
-    payment = create_payment(order["id"], str(order["total"]))
-    return redirect(payment["paymentUrl"], code=303)
+    checkout = create_checkout(order["id"], str(order["total"]))
+    return redirect(checkout["paymentUrl"], code=303)
 ```
 
 ## 3. Send the customer to paymentUrl
 
-paymentUrl is a hosted payment page: the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Open it with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook or the status from GET /v1/payments/:id. In Flask: redirect(payment["paymentUrl"], code=303).
+paymentUrl is the Moonvex checkout page: the customer picks the coin and network, then sees the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Your description is shown as “You are paying for”, and the Back and “Back to the shop” buttons lead to returnUrl. If you know the customer's language, add ?lang=ru, ?lang=uk or ?lang=en to paymentUrl; otherwise the page picks the language itself. Open the page with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook. In Flask: redirect(payment["paymentUrl"], code=303).
 
 ## 4. Receive the webhook and verify the signature
 
@@ -114,12 +120,13 @@ def moonvex_webhook():
     event = json.loads(raw)
     if event["type"] in ("payment.confirmed", "payment.overpaid"):
         mark_paid_once(event["id"], event["data"]["orderId"])
+    # payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
     return "", 200
 ```
 
 ## 5. Mark the order paid exactly once
 
-A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. In SQLite that is INSERT OR IGNORE plus a cursor.rowcount check in one transaction.
+A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. Events arrive for the payment the customer starts: data.id is its pay_… id and data.orderId is your order number. If the customer switches coins, the previous payment gets payment.cancelled: do not cancel the order on it while the checkout is open. In SQLite that is INSERT OR IGNORE plus a cursor.rowcount check in one transaction.
 
 File: [`05-mark-the-order-paid-exactly-once.py`](./05-mark-the-order-paid-exactly-once.py)
 
@@ -146,6 +153,7 @@ Moonvex has no test network: everything runs on mainnets. The “Send test” bu
 - Keep amounts as Decimal or strings. 0.1 + 0.2 in float is not 0.3, and in payments that is an error in cents.
 - Always pass a timeout to requests.post; without it a hung request holds the worker forever.
 - verify_moonvex accepts every v1 value in the header, so a secret rotation causes no downtime.
+- Need one fixed coin instead of the customer's choice? Add network (and asset when currency is USD) to the same request, for example "network": "TRON", "asset": "USDT": that is the classic payment in one coin. The checkout above is the recommended flow.
 
 ## FAQ
 
@@ -155,7 +163,7 @@ The official SDK is for Node.js (@moonvex/node). In Python requests or httpx is 
 
 **What if the customer does not pay in time?**
 
-The payment moves to EXPIRED and you receive payment.expired. You can create a new payment for the same orderId with a new Idempotency-Key (for example, bump the attempt number at the end of the key). The payment window is set with expiresInMinutes: 5 to 1440 minutes, 30 by default.
+The checkout is valid until expiresAt; the window is set with expiresInMinutes, 5 to 1440 minutes, 30 by default. If the customer started a payment and did not pay it in time, it moves to EXPIRED and you receive payment.expired. To let them try again, create a new checkout with a new Idempotency-Key (for example, bump the attempt number at the end of the key); if the API answers DUPLICATE_ORDER, that order number is closed, so use a new orderId such as 1001-2.
 
 **Is there a test mode or a sandbox?**
 

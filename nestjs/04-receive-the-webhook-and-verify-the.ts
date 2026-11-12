@@ -31,6 +31,7 @@ export class MoonvexWebhookController {
     if (event.type === 'payment.confirmed' || event.type === 'payment.overpaid') {
       await this.orders.markPaidOnce(event.id, event.data.orderId!);
     }
+    // payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
     return { received: true };
   }
 }

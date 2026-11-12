@@ -1,6 +1,6 @@
 # Accept crypto payments in an aiogram Telegram bot
 
-An aiogram 3 bot issues a Moonvex invoice on /buy and sends a pay button, while an aiohttp server in the same process receives the webhook, verifies the signature and tells the customer the payment arrived. Bots with a balance get a permanent top-up address.
+An aiogram 3 bot creates a Moonvex checkout on /buy and sends a pay button (the customer picks the coin and network on the page), while an aiohttp server in the same process receives the webhook, verifies the signature and tells the customer the payment arrived. Bots with a balance get a permanent top-up address.
 
 Full guide with explanations: https://moonvex.org/en/guides/telegram-aiogram?utm_source=github&utm_medium=repo&utm_campaign=telegram-aiogram
 
@@ -21,7 +21,7 @@ export DATABASE_URL=postgresql://user:pass@localhost:5432/bot
 
 ## 2. Issue an invoice on /buy
 
-The handler creates the payment with httpx.AsyncClient: orderId from the chat and message, customerId as the Telegram user id, and chatId in metadata. Metadata comes back in the webhook, so the bot knows whom to message.
+The handler creates a checkout with httpx.AsyncClient: there is no network in the request, so the customer picks the coin and network on the Moonvex page. orderId comes from the chat and message, customerId is the Telegram user id, and chatId goes into metadata; metadata comes back in the webhook, so the bot knows whom to message. description is shown as “You are paying for”, and returnUrl is the bot link https://t.me/<bot_username>, so the Back buttons return the customer to the chat. The user's language_code picks the checkout language: ?lang=ru or ?lang=uk, otherwise en.
 
 File: [`02-issue-an-invoice-on-buy.py`](./02-issue-an-invoice-on-buy.py)
 
@@ -47,29 +47,35 @@ moonvex = httpx.AsyncClient(
 async def buy(message: Message) -> None:
     # a unique order id: chat + message
     order_id = f"tg-{message.chat.id}-{message.message_id}"
+    me = await bot.me()
     r = await moonvex.post(
         "/v1/payments",
         headers={"Idempotency-Key": order_id + "-1"},
         json={
             "orderId": order_id,
             "amount": "10",
-            "currency": "USDT",
-            "network": "TRON",
+            "currency": "USD",  # no network: the customer picks the coin on the checkout page
+            "description": "Premium access for 30 days",  # shown as “You are paying for”
+            "returnUrl": f"https://t.me/{me.username}",  # the Back buttons lead back to the bot
             "customerId": str(message.from_user.id),
             "metadata": {"chatId": message.chat.id},  # comes back in the webhook
         },
     )
-    payment = r.json()
+    checkout = r.json()
     if r.status_code >= 400:
         await message.answer("Could not create the invoice, try again later")
         return
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Pay", url=payment["paymentUrl"])]])
-    await message.answer(f"Amount due: {payment['amount']} {payment['asset']} ({payment['network']})", reply_markup=kb)
+    # checkout language from the Telegram user's language
+    code = (message.from_user.language_code or "")[:2]
+    lang = code if code in ("ru", "uk") else "en"
+    url = checkout["paymentUrl"] + "?lang=" + lang
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Pay", url=url)]])
+    await message.answer(f"To pay: {checkout['amount']} {checkout['currency']}. Choose the coin and network on the next page.", reply_markup=kb)
 ```
 
 ## 3. Send the pay button
 
-paymentUrl is a hosted payment page with the amount, address and QR code; open it with an inline button carrying a url. It opens in the browser and cannot be embedded in a frame. Show the customer amount from the response: that is the total including the fee.
+paymentUrl is the Moonvex checkout page; open it with an inline button carrying a url. There the customer picks the coin and network and sees the exact amount including the fee, the address and a QR code; until funds arrive they can switch to another coin. The page opens in the browser and cannot be embedded in a frame. The Back and “Back to the shop” buttons lead to returnUrl, the bot chat. The checkout response carries your price (amount and currency); the total in the chosen coin is shown on the page.
 
 ## 4. Receive the webhook and verify the signature
 
@@ -106,6 +112,7 @@ async def moonvex_webhook(request: web.Request) -> web.Response:
     if event["type"] in ("payment.confirmed", "payment.overpaid") and await claim_event(request.app["db"], event["id"]):
         chat_id = event["data"]["metadata"]["chatId"]
         await bot.send_message(chat_id, "Payment received, thank you! Order " + event["data"]["orderId"])
+    # payment.cancelled also arrives when the customer switches coins: ignore it, the checkout stays open
     return web.Response(text="ok")
 
 
@@ -125,7 +132,7 @@ if __name__ == "__main__":
 
 ## 5. Mark the order paid exactly once
 
-A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. claim_event inserts the event id with ON CONFLICT DO NOTHING and returns True only for the first delivery, so the message is never sent twice.
+A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. Events arrive for the payment the customer starts: data.id is its pay_… id and data.orderId is your order number. If the customer switches coins, the previous payment gets payment.cancelled: do not cancel the order on it while the checkout is open. claim_event inserts the event id with ON CONFLICT DO NOTHING and returns True only for the first delivery, so the message is never sent twice.
 
 File: [`05-mark-the-order-paid-exactly-once.py`](./05-mark-the-order-paid-exactly-once.py)
 
@@ -177,6 +184,7 @@ if event["type"] == "deposit.confirmed" and await claim_event(request.app["db"],
 - Keep chat_id in metadata: metadata values are strings, numbers, true/false or null.
 - If sending the message fails after claim_event, the event is already marked. For critical actions enqueue them in the same transaction.
 - There is no test network: test the bot with a 1 USDT payment on TRON and the “Send test” button in the dashboard.
+- Need one fixed coin instead of the customer's choice? Add network (and asset when currency is USD) to the same request, for example "network": "TRON", "asset": "USDT": that is the classic payment in one coin. The checkout above is the recommended flow.
 
 ## FAQ
 
@@ -190,7 +198,7 @@ No. The customer pays in crypto on the Moonvex payment page and the money lands 
 
 **What if the customer does not pay in time?**
 
-The payment moves to EXPIRED and you receive payment.expired. You can create a new payment for the same orderId with a new Idempotency-Key (for example, bump the attempt number at the end of the key). The payment window is set with expiresInMinutes: 5 to 1440 minutes, 30 by default.
+The checkout is valid until expiresAt; the window is set with expiresInMinutes, 5 to 1440 minutes, 30 by default. If the customer started a payment and did not pay it in time, it moves to EXPIRED and you receive payment.expired. To let them try again, create a new checkout with a new Idempotency-Key (for example, bump the attempt number at the end of the key); if the API answers DUPLICATE_ORDER, that order number is closed, so use a new orderId such as 1001-2.
 
 ---
 

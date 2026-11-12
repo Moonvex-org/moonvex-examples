@@ -32,10 +32,15 @@ async def pay(order_id: int, request: Request):
     r = await request.app.state.moonvex.post(
         "/v1/payments",
         headers={"Idempotency-Key": f"order-{order_id}-1"},
-        # numeric arrives as Decimal → str(): "25.00"
-        json={"orderId": str(order_id), "amount": str(order["total"]), "currency": "USDT", "network": "TRON"},
+        json={
+            "orderId": str(order_id),
+            "amount": str(order["total"]),  # numeric arrives as Decimal → str(): "25.00"
+            "currency": "USD",  # no network: the customer picks the coin on the checkout page
+            "description": f"Order #{order_id}",  # shown as “You are paying for”
+            "returnUrl": f"https://shop.example.com/orders/{order_id}",  # the Back buttons
+        },
     )
-    payment = r.json()
+    checkout = r.json()
     if r.status_code >= 400:
-        raise HTTPException(502, payment["error"]["code"])
-    return RedirectResponse(payment["paymentUrl"], status_code=303)
+        raise HTTPException(502, checkout["error"]["code"])
+    return RedirectResponse(checkout["paymentUrl"], status_code=303)

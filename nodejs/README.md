@@ -1,6 +1,6 @@
 # Accept crypto payments in Node.js
 
-A step-by-step Moonvex integration in plain Node.js with the official @moonvex/node SDK: your server creates an invoice, the customer pays on a hosted page, and an HMAC-signed webhook marks the order paid. No framework, just node:http and PostgreSQL.
+A step-by-step Moonvex integration in plain Node.js with the official @moonvex/node SDK: your server creates a checkout, the customer picks the coin and network and pays on a hosted page, and an HMAC-signed webhook marks the order paid. No framework, just node:http and PostgreSQL.
 
 Full guide with explanations: https://moonvex.org/en/guides/nodejs?utm_source=github&utm_medium=repo&utm_campaign=nodejs
 
@@ -19,11 +19,11 @@ MOONVEX_WEBHOOK_SECRET=whsec_...
 DATABASE_URL=postgres://user:pass@localhost:5432/shop
 ```
 
-## 2. Create a payment with the SDK
+## 2. Create a checkout with the SDK
 
-payments.create takes orderId, the amount as a string, currency and network. The second argument is idempotencyKey: a retry after a timeout returns the same payment instead of creating another one. The SDK itself retries network errors, 429 and 5xx with the same key. Errors are thrown as MoonvexError with status, code and detailsCode, for example DUPLICATE_ORDER when the order already has an active payment.
+checkouts.create takes orderId, the amount as a string and currency (USD or a coin such as USDT); there is no network: the customer picks the coin and network on the Moonvex page. description is shown to the customer as “You are paying for”, and returnUrl (https only) is where the Back buttons lead. The second argument is idempotencyKey: a retry after a timeout returns the same checkout instead of creating another one. The SDK itself retries network errors, 429 and 5xx with the same key. Errors are thrown as MoonvexError with status, code and detailsCode, for example DUPLICATE_ORDER when the order already has a payment in progress.
 
-File: [`02-create-a-payment-with-the-sdk.js`](./02-create-a-payment-with-the-sdk.js)
+File: [`02-create-a-checkout-with-the-sdk.js`](./02-create-a-checkout-with-the-sdk.js)
 
 ```js
 // moonvex.js
@@ -31,15 +31,16 @@ import { Moonvex, MoonvexError } from '@moonvex/node';
 
 export const moonvex = new Moonvex({ apiKey: process.env.MOONVEX_SECRET_KEY });
 
-/** Creates an invoice for the order; a retry with the same key returns the same payment */
-export async function createPaymentForOrder(order, attempt = 1) {
+/** Creates a checkout for the order; a retry with the same key returns the same checkout */
+export async function createCheckoutForOrder(order, attempt = 1) {
   try {
-    return await moonvex.payments.create(
+    return await moonvex.checkouts.create(
       {
         orderId: String(order.id),
         amount: order.total, // a string such as "25.00", not a number
-        currency: 'USDT',
-        network: 'TRON',
+        currency: 'USD', // the customer picks the coin and network on the checkout page
+        description: 'Order #' + order.id + ': ' + order.itemCount + ' items', // “You are paying for”
+        returnUrl: 'https://shop.example.com/orders/' + order.id, // the Back buttons
         customerId: String(order.userId),
         expiresInMinutes: 30,
       },
@@ -47,7 +48,7 @@ export async function createPaymentForOrder(order, attempt = 1) {
     );
   } catch (err) {
     if (err instanceof MoonvexError && err.detailsCode === 'DUPLICATE_ORDER') {
-      // the order already has an active payment, return it
+      // the customer has already started a payment for this order, return it (it has a paymentUrl too)
       const page = await moonvex.payments.list({ orderId: String(order.id), limit: 1 });
       if (page.data[0]) return page.data[0];
     }
@@ -58,7 +59,7 @@ export async function createPaymentForOrder(order, attempt = 1) {
 
 ## 3. Send the customer to paymentUrl
 
-paymentUrl is a hosted payment page: the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Open it with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook or the status from GET /v1/payments/:id. Answering a POST form with 303 makes the browser open the payment page with a plain GET.
+paymentUrl is the Moonvex checkout page: the customer picks the coin and network, then sees the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Your description is shown as “You are paying for”, and the Back and “Back to the shop” buttons lead to returnUrl. If you know the customer's language, open withLanguage(checkout.paymentUrl, 'en') from @moonvex/node (it adds ?lang=, one of ru, uk, en); otherwise the page picks the language itself. Open the page with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook. Answering a POST form with 303 makes the browser open the checkout with a plain GET.
 
 File: [`03-send-the-customer-to-paymenturl.js`](./03-send-the-customer-to-paymenturl.js)
 
@@ -66,7 +67,7 @@ File: [`03-send-the-customer-to-paymenturl.js`](./03-send-the-customer-to-paymen
 // server.js
 import http from 'node:http';
 import { db } from './db.js';
-import { createPaymentForOrder } from './moonvex.js';
+import { createCheckoutForOrder } from './moonvex.js';
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
@@ -74,13 +75,13 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && pay) {
     const { rows } = await db.query(
-      'SELECT id, user_id AS "userId", total::text AS total FROM orders WHERE id = $1',
+      'SELECT id, user_id AS "userId", total::text AS total, item_count AS "itemCount" FROM orders WHERE id = $1',
       [pay[1]],
     );
     if (!rows[0]) return res.writeHead(404).end();
-    const payment = await createPaymentForOrder(rows[0]);
-    // 303 makes the browser open the payment page with a GET
-    return res.writeHead(303, { Location: payment.paymentUrl }).end();
+    const checkout = await createCheckoutForOrder(rows[0]);
+    // 303 makes the browser open the checkout page with a GET
+    return res.writeHead(303, { Location: checkout.paymentUrl }).end();
   }
 
   if (req.method === 'POST' && url.pathname === '/moonvex/webhook') {
@@ -125,6 +126,7 @@ async function handleWebhook(req, res) {
   if (event.type === 'payment.confirmed' || event.type === 'payment.overpaid') {
     await markOrderPaidOnce(event.id, event.data.orderId);
   }
+  // payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
   // any 2xx within 10 seconds, otherwise Moonvex retries the delivery
   res.writeHead(200).end('ok');
 }
@@ -132,7 +134,7 @@ async function handleWebhook(req, res) {
 
 ## 5. Mark the order paid exactly once
 
-A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. Respond with a 2xx within 10 seconds; on failure (5xx, timeout) Moonvex retries the delivery for about three days.
+A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. Events arrive for the payment the customer starts: data.id is its pay_… id and data.orderId is your order number. If the customer switches coins, the previous payment gets payment.cancelled: do not cancel the order on it while the checkout is open. Respond with a 2xx within 10 seconds; on failure (5xx, timeout) Moonvex retries the delivery for about three days.
 
 File: [`05-mark-the-order-paid-exactly-once.js`](./05-mark-the-order-paid-exactly-once.js)
 
@@ -183,12 +185,13 @@ Moonvex has no test network: everything runs on mainnets. The “Send test” bu
 - Build idempotencyKey from the order number and attempt (order-1001-1) rather than a random UUID, so a retry after a process restart is safe too.
 - Amounts are strings. Read total from PostgreSQL as numeric::text instead of Number(): floats lose cents.
 - Do slow work (emails, granting access) after responding 200, in a queue. A response slower than 10 seconds counts as a failed delivery.
+- Need one fixed coin instead of the customer's choice? moonvex.payments.create with network (and asset when currency is USD), for example network: 'TRON', asset: 'USDT', still works and opens the page straight on the address. The checkout flow above is recommended.
 
 ## FAQ
 
 **Do I need the SDK, or is fetch enough?**
 
-You can skip the SDK: the API is plain HTTPS with JSON and an Authorization: Bearer header. The SDK adds TypeScript types, retries with the same Idempotency-Key and a ready-made verifyWebhook. See the Express guide for a version without the SDK.
+You can skip the SDK: the API is plain HTTPS with JSON and an Authorization: Bearer header. The SDK adds TypeScript types, retries with the same Idempotency-Key, a ready-made verifyWebhook and withLanguage for the checkout link. See the Express guide for a version without the SDK.
 
 **Is there a test mode or a sandbox?**
 
@@ -196,7 +199,7 @@ No, there is no test network: Moonvex runs on mainnets only. Check the signature
 
 **What if the customer does not pay in time?**
 
-The payment moves to EXPIRED and you receive payment.expired. You can create a new payment for the same orderId with a new Idempotency-Key (for example, bump the attempt number at the end of the key). The payment window is set with expiresInMinutes: 5 to 1440 minutes, 30 by default.
+The checkout is valid until expiresAt; the window is set with expiresInMinutes, 5 to 1440 minutes, 30 by default. If the customer started a payment and did not pay it in time, it moves to EXPIRED and you receive payment.expired. To let them try again, create a new checkout with a new Idempotency-Key (for example, bump the attempt number at the end of the key); if the API answers DUPLICATE_ORDER, that order number is closed, so use a new orderId such as 1001-2.
 
 ---
 

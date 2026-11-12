@@ -1,6 +1,6 @@
 # Accept crypto payments in Laravel
 
-How to connect Moonvex to Laravel: an invokable controller creates the payment through the Http facade, and a second controller receives the webhook via $request->getContent(), verifies the signature and marks the order in a transaction.
+How to connect Moonvex to Laravel: an invokable controller creates a checkout through the Http facade (the customer picks the coin on the Moonvex page), and a second controller receives the webhook via $request->getContent(), verifies the signature and marks the order in a transaction.
 
 Full guide with explanations: https://moonvex.org/en/guides/laravel?utm_source=github&utm_medium=repo&utm_campaign=laravel
 
@@ -22,11 +22,11 @@ MOONVEX_WEBHOOK_SECRET=whsec_...
 ],
 ```
 
-## 2. Create a payment with Http
+## 2. Create a checkout with Http
 
-Http::withToken(…)->withHeaders(['Idempotency-Key' => …])->post(…) sends JSON. The decimal:2 cast on the model returns the amount as a string. API errors show up in $response->failed() and $response->json('error.code').
+Http::withToken(…)->withHeaders(['Idempotency-Key' => …])->post(…) sends JSON. Without network Moonvex creates a checkout and the customer picks the coin and network on its page. description is shown as “You are paying for”, returnUrl is where the Back buttons lead (route() builds it; it must be https). The decimal:2 cast on the model returns the amount as a string. API errors show up in $response->failed() and $response->json('error.code').
 
-File: [`02-create-a-payment-with-http.php`](./02-create-a-payment-with-http.php)
+File: [`02-create-a-checkout-with-http.php`](./02-create-a-checkout-with-http.php)
 
 ```php
 <?php
@@ -48,15 +48,16 @@ class PayController extends Controller
             ->post('https://api.moonvex.org/v1/payments', [
                 'orderId' => (string) $order->id,
                 'amount' => (string) $order->total, // the decimal:2 cast gives a "25.00" string
-                'currency' => 'USDT',
-                'network' => 'TRON',
+                'currency' => 'USD', // no network: the customer picks the coin on the checkout page
+                'description' => 'Order #' . $order->id, // shown as “You are paying for”
+                'returnUrl' => route('orders.show', $order), // the Back buttons, https only
             ]);
 
         if ($response->failed()) {
             abort(502, 'Moonvex: ' . $response->json('error.code'));
         }
 
-        $order->update(['moonvex_payment_id' => $response->json('id')]);
+        $order->update(['moonvex_checkout_id' => $response->json('id')]); // inv_…
 
         return redirect()->away($response->json('paymentUrl'));
     }
@@ -64,11 +65,12 @@ class PayController extends Controller
 
 // routes/web.php
 Route::post('/orders/{order}/pay', PayController::class)->middleware('auth');
+Route::get('/orders/{order}', [OrderController::class, 'show'])->name('orders.show');
 ```
 
 ## 3. Send the customer to paymentUrl
 
-paymentUrl is a hosted payment page: the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Open it with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook or the status from GET /v1/payments/:id. redirect()->away($url) is Laravel's external redirect.
+paymentUrl is the Moonvex checkout page: the customer picks the coin and network, then sees the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Your description is shown as “You are paying for”, and the Back and “Back to the shop” buttons lead to returnUrl. If you know the customer's language, add ?lang=ru, ?lang=uk or ?lang=en to paymentUrl; otherwise the page picks the language itself. Open the page with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook. redirect()->away($url) is Laravel's external redirect.
 
 ## 4. Receive the webhook and verify the signature
 
@@ -98,6 +100,7 @@ class MoonvexWebhookController extends Controller
         if (in_array($event['type'], ['payment.confirmed', 'payment.overpaid'], true)) {
             Order::markPaidOnce($event['id'], $event['data']['orderId']);
         }
+        // payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
 
         return response('ok');
     }
@@ -131,7 +134,7 @@ Route::post('/moonvex/webhook', MoonvexWebhookController::class);
 
 ## 5. Mark the order paid exactly once
 
-A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. DB::table()->insertOrIgnore() returns the number of inserted rows: 0 means the event was already processed.
+A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. Events arrive for the payment the customer starts: data.id is its pay_… id and data.orderId is your order number. If the customer switches coins, the previous payment gets payment.cancelled: do not cancel the order on it while the checkout is open. DB::table()->insertOrIgnore() returns the number of inserted rows: 0 means the event was already processed.
 
 File: [`05-mark-the-order-paid-exactly-once.php`](./05-mark-the-order-paid-exactly-once.php)
 
@@ -145,7 +148,7 @@ use Illuminate\Support\Facades\DB;
 
 class Order extends Model
 {
-    protected $fillable = ['moonvex_payment_id', 'status'];
+    protected $fillable = ['moonvex_checkout_id', 'status'];
 
     protected $casts = ['total' => 'decimal:2'];
 
@@ -177,6 +180,8 @@ Moonvex has no test network: everything runs on mainnets. The “Send test” bu
 - Never call env() outside config files: after php artisan config:cache it returns null.
 - You can queue the post-webhook work (dispatch(...)->afterResponse() or a Job), but record the event_id right away.
 - Do not use $request->all() for signature checks: that is parsed data and the bytes differ.
+- Behind a proxy or load balancer configure TrustProxies (or URL::forceScheme('https')), otherwise route() builds an http returnUrl and the API rejects it.
+- Need one fixed coin instead of the customer's choice? Add network (and asset when currency is USD) to the same request, for example 'network' => 'TRON', 'asset' => 'USDT': that is the classic payment in one coin. The checkout above is the recommended flow.
 
 ## FAQ
 
@@ -186,7 +191,7 @@ Yes. The only difference is CSRF: in Laravel 10 and earlier add moonvex/webhook 
 
 **What if the customer does not pay in time?**
 
-The payment moves to EXPIRED and you receive payment.expired. You can create a new payment for the same orderId with a new Idempotency-Key (for example, bump the attempt number at the end of the key). The payment window is set with expiresInMinutes: 5 to 1440 minutes, 30 by default.
+The checkout is valid until expiresAt; the window is set with expiresInMinutes, 5 to 1440 minutes, 30 by default. If the customer started a payment and did not pay it in time, it moves to EXPIRED and you receive payment.expired. To let them try again, create a new checkout with a new Idempotency-Key (for example, bump the attempt number at the end of the key); if the API answers DUPLICATE_ORDER, that order number is closed, so use a new orderId such as 1001-2.
 
 **Is there a test mode or a sandbox?**
 

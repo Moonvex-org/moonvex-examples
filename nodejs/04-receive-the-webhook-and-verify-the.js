@@ -23,6 +23,7 @@ async function handleWebhook(req, res) {
   if (event.type === 'payment.confirmed' || event.type === 'payment.overpaid') {
     await markOrderPaidOnce(event.id, event.data.orderId);
   }
+  // payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
   // any 2xx within 10 seconds, otherwise Moonvex retries the delivery
   res.writeHead(200).end('ok');
 }

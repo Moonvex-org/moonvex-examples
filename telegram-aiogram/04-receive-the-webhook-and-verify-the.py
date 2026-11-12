@@ -26,6 +26,7 @@ async def moonvex_webhook(request: web.Request) -> web.Response:
     if event["type"] in ("payment.confirmed", "payment.overpaid") and await claim_event(request.app["db"], event["id"]):
         chat_id = event["data"]["metadata"]["chatId"]
         await bot.send_message(chat_id, "Payment received, thank you! Order " + event["data"]["orderId"])
+    # payment.cancelled also arrives when the customer switches coins: ignore it, the checkout stays open
     return web.Response(text="ok")
 
 

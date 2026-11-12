@@ -21,6 +21,7 @@ app.post('/moonvex/webhook', express.raw({ type: 'application/json' }), async (r
       'Payment received, thank you! Order ' + event.data.orderId,
     );
   }
+  // payment.cancelled also arrives when the customer switches coins: ignore it, the checkout stays open
   res.sendStatus(200);
 });
 

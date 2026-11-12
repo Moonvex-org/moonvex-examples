@@ -18,5 +18,6 @@ export async function POST(req: Request) {
   if (event.type === 'payment.confirmed' || event.type === 'payment.overpaid') {
     await markOrderPaidOnce(event.id, event.data.orderId!);
   }
+  // payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
   return new Response('ok');
 }

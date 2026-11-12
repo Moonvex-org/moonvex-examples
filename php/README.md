@@ -1,6 +1,6 @@
 # Accept crypto payments in PHP
 
-A Moonvex integration in plain PHP: cURL creates the payment, the customer pays on a hosted page, and the webhook reads php://input, verifies the hash_hmac signature and marks the order in MySQL exactly once.
+A Moonvex integration in plain PHP: cURL creates a checkout, the customer picks the coin and network and pays on a hosted page, and the webhook reads php://input, verifies the hash_hmac signature and marks the order in MySQL exactly once.
 
 Full guide with explanations: https://moonvex.org/en/guides/php?utm_source=github&utm_medium=repo&utm_campaign=php
 
@@ -16,11 +16,11 @@ MOONVEX_SECRET_KEY=sk_live_...
 MOONVEX_WEBHOOK_SECRET=whsec_...
 ```
 
-## 2. Create a payment with cURL
+## 2. Create a checkout with cURL
 
-POST /v1/payments with Authorization: Bearer, Idempotency-Key and a JSON body. A DECIMAL column already comes back from PDO as a string, so pass it as is. Always set CURLOPT_TIMEOUT.
+POST /v1/payments with Authorization: Bearer, Idempotency-Key and a JSON body. Without network and asset Moonvex creates a checkout: the customer picks the coin and network on its page. description is shown as “You are paying for”, returnUrl (https only) is where the Back buttons lead. A DECIMAL column already comes back from PDO as a string, so pass it as is. Always set CURLOPT_TIMEOUT.
 
-File: [`02-create-a-payment-with-curl.php`](./02-create-a-payment-with-curl.php)
+File: [`02-create-a-checkout-with-curl.php`](./02-create-a-checkout-with-curl.php)
 
 ```php
 <?php
@@ -45,23 +45,24 @@ curl_setopt_array($ch, [
   CURLOPT_POSTFIELDS => json_encode([
     'orderId' => (string) $order['id'],
     'amount' => (string) $order['total'], // DECIMAL from PDO is already a "25.00" string
-    'currency' => 'USDT',
-    'network' => 'TRON',
+    'currency' => 'USD', // no network: the customer picks the coin on the checkout page
+    'description' => 'Order #' . $order['id'], // shown as “You are paying for”
+    'returnUrl' => 'https://shop.example.com/orders/' . $order['id'], // the Back buttons
   ]),
 ]);
-$payment = json_decode(curl_exec($ch), true);
+$checkout = json_decode(curl_exec($ch), true);
 $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-if ($status >= 400 || !$payment) {
+if ($status >= 400 || !$checkout) {
   http_response_code(502);
-  exit('Moonvex: ' . ($payment['error']['code'] ?? 'network error'));
+  exit('Moonvex: ' . ($checkout['error']['code'] ?? 'network error'));
 }
 
-header('Location: ' . $payment['paymentUrl'], true, 303);
+header('Location: ' . $checkout['paymentUrl'], true, 303);
 ```
 
 ## 3. Send the customer to paymentUrl
 
-paymentUrl is a hosted payment page: the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Open it with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook or the status from GET /v1/payments/:id. In PHP: header('Location: …', true, 303).
+paymentUrl is the Moonvex checkout page: the customer picks the coin and network, then sees the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Your description is shown as “You are paying for”, and the Back and “Back to the shop” buttons lead to returnUrl. If you know the customer's language, add ?lang=ru, ?lang=uk or ?lang=en to paymentUrl; otherwise the page picks the language itself. Open the page with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook. In PHP: header('Location: …', true, 303).
 
 ## 4. Receive the webhook and verify the signature
 
@@ -99,13 +100,14 @@ $event = json_decode($raw, true);
 if (in_array($event['type'], ['payment.confirmed', 'payment.overpaid'], true)) {
   mark_paid_once($event['id'], $event['data']['orderId']);
 }
+// payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
 http_response_code(200);
 echo 'ok';
 ```
 
 ## 5. Mark the order paid exactly once
 
-A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. In MySQL INSERT IGNORE is convenient: rowCount() returns 0 if the event was seen before.
+A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. Events arrive for the payment the customer starts: data.id is its pay_… id and data.orderId is your order number. If the customer switches coins, the previous payment gets payment.cancelled: do not cancel the order on it while the checkout is open. In MySQL INSERT IGNORE is convenient: rowCount() returns 0 if the event was seen before.
 
 File: [`05-mark-the-order-paid-exactly-once.php`](./05-mark-the-order-paid-exactly-once.php)
 
@@ -141,16 +143,17 @@ Moonvex has no test network: everything runs on mainnets. The “Send test” bu
 - Never compare signatures with == or ===: hash_equals runs in constant time.
 - Do not cast amounts to float: use (string) on a DECIMAL, or number_format with a dot and no thousands separator.
 - Behind nginx and php-fpm the Moonvex-Signature header is available as HTTP_MOONVEX_SIGNATURE; make sure your proxy does not strip it.
+- Need one fixed coin instead of the customer's choice? Add network (and asset when currency is USD) to the same request, for example 'network' => 'TRON', 'asset' => 'USDT': that is the classic payment in one coin. The checkout above is the recommended flow.
 
 ## FAQ
 
 **Which PHP version do I need?**
 
-The code in this guide runs on PHP 7.4+ with the curl and pdo extensions. Nothing beyond the standard library is required.
+The code in this guide runs on PHP 7.4+ with the curl and pdo extensions. Nothing beyond the standard library is required. For WooCommerce there is a ready-made plugin, see the WooCommerce guide.
 
-**Why is amount in the response higher than the order price?**
+**Why is amount in the webhook higher than the order price?**
 
-The customer pays the Moonvex fee on top, so amount is the total due. Your price stays in pricing.amount, and what you receive on a full payment is in merchantAmount. Reconcile orders by orderId and pricing.amount, and show the customer amount.
+The checkout returns your price as is in amount and currency. The payment the customer starts (data in webhooks) is in the chosen coin, and its amount is the total due including the Moonvex fee on top. Your price stays in pricing.amount, and what you receive on a full payment is in merchantAmount. Reconcile orders by orderId and pricing.amount.
 
 **Is there a test mode or a sandbox?**
 

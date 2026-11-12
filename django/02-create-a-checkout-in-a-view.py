@@ -21,13 +21,14 @@ def pay(request, order_id: int):
         json={
             "orderId": str(order.pk),
             "amount": str(order.total),  # Decimal → "25.00", no float
-            "currency": "USDT",
-            "network": "TRON",
+            "currency": "USD",  # no network: the customer picks the coin on the checkout page
+            "description": f"Order #{order.pk}",  # shown as “You are paying for”
+            "returnUrl": request.build_absolute_uri(f"/orders/{order.pk}/"),  # the Back buttons, https only
         },
         timeout=15,
     )
-    payment = r.json()
+    checkout = r.json()
     if r.status_code >= 400:
-        raise RuntimeError(payment["error"]["code"] + ": " + payment["error"]["message"])
-    Order.objects.filter(pk=order.pk).update(moonvex_payment_id=payment["id"])
-    return redirect(payment["paymentUrl"])
+        raise RuntimeError(checkout["error"]["code"] + ": " + checkout["error"]["message"])
+    Order.objects.filter(pk=order.pk).update(moonvex_checkout_id=checkout["id"])
+    return redirect(checkout["paymentUrl"])

@@ -1,0 +1,1 @@
+https://your-shop/wp-json/moonvex/v1/webhook

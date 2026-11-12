@@ -1,6 +1,6 @@
 # Accept crypto payments in FastAPI
 
-Fully asynchronous crypto payments in FastAPI: a shared httpx.AsyncClient for the Moonvex API, a redirect to the payment page, and a webhook that verifies the signature over the raw body and marks the order in PostgreSQL through asyncpg.
+Fully asynchronous crypto payments in FastAPI: a shared httpx.AsyncClient for the Moonvex API, a redirect to the checkout where the customer picks the coin, and a webhook that verifies the signature over the raw body and marks the order in PostgreSQL through asyncpg.
 
 Full guide with explanations: https://moonvex.org/en/guides/fastapi?utm_source=github&utm_medium=repo&utm_campaign=fastapi
 
@@ -18,11 +18,11 @@ export MOONVEX_WEBHOOK_SECRET=whsec_...
 export DATABASE_URL=postgresql://user:pass@localhost:5432/shop
 ```
 
-## 2. Create a payment
+## 2. Create a checkout
 
-The httpx client is created once in lifespan with the base URL and the Authorization header. Each payment gets its own Idempotency-Key, and the amount is str(Decimal) from a numeric column.
+The httpx client is created once in lifespan with the base URL and the Authorization header. The request has no network, so Moonvex creates a checkout where the customer picks the coin and network. Each checkout gets its own Idempotency-Key, the amount is str(Decimal) from a numeric column, description is shown as “You are paying for” and returnUrl (https only) is where the Back buttons lead.
 
-File: [`02-create-a-payment.py`](./02-create-a-payment.py)
+File: [`02-create-a-checkout.py`](./02-create-a-checkout.py)
 
 ```python
 # main.py
@@ -59,18 +59,23 @@ async def pay(order_id: int, request: Request):
     r = await request.app.state.moonvex.post(
         "/v1/payments",
         headers={"Idempotency-Key": f"order-{order_id}-1"},
-        # numeric arrives as Decimal → str(): "25.00"
-        json={"orderId": str(order_id), "amount": str(order["total"]), "currency": "USDT", "network": "TRON"},
+        json={
+            "orderId": str(order_id),
+            "amount": str(order["total"]),  # numeric arrives as Decimal → str(): "25.00"
+            "currency": "USD",  # no network: the customer picks the coin on the checkout page
+            "description": f"Order #{order_id}",  # shown as “You are paying for”
+            "returnUrl": f"https://shop.example.com/orders/{order_id}",  # the Back buttons
+        },
     )
-    payment = r.json()
+    checkout = r.json()
     if r.status_code >= 400:
-        raise HTTPException(502, payment["error"]["code"])
-    return RedirectResponse(payment["paymentUrl"], status_code=303)
+        raise HTTPException(502, checkout["error"]["code"])
+    return RedirectResponse(checkout["paymentUrl"], status_code=303)
 ```
 
 ## 3. Send the customer to paymentUrl
 
-paymentUrl is a hosted payment page: the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Open it with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook or the status from GET /v1/payments/:id. RedirectResponse(..., status_code=303) after a POST opens the payment page.
+paymentUrl is the Moonvex checkout page: the customer picks the coin and network, then sees the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Your description is shown as “You are paying for”, and the Back and “Back to the shop” buttons lead to returnUrl. If you know the customer's language, add ?lang=ru, ?lang=uk or ?lang=en to paymentUrl; otherwise the page picks the language itself. Open the page with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook. RedirectResponse(..., status_code=303) after a POST opens the payment page.
 
 ## 4. Receive the webhook and verify the signature
 
@@ -104,12 +109,13 @@ async def moonvex_webhook(request: Request):
     event = json.loads(raw)
     if event["type"] in ("payment.confirmed", "payment.overpaid"):
         await mark_paid_once(request.app.state.db, event["id"], event["data"]["orderId"])
+    # payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
     return {"received": True}
 ```
 
 ## 5. Mark the order paid exactly once
 
-A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. With asyncpg: INSERT … ON CONFLICT DO NOTHING RETURNING inside conn.transaction(); None means a redelivery.
+A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. Events arrive for the payment the customer starts: data.id is its pay_… id and data.orderId is your order number. If the customer switches coins, the previous payment gets payment.cancelled: do not cancel the order on it while the checkout is open. With asyncpg: INSERT … ON CONFLICT DO NOTHING RETURNING inside conn.transaction(); None means a redelivery.
 
 File: [`05-mark-the-order-paid-exactly-once.py`](./05-mark-the-order-paid-exactly-once.py)
 
@@ -139,16 +145,17 @@ Moonvex has no test network: everything runs on mainnets. The “Send test” bu
 - Create httpx.AsyncClient once (in lifespan) rather than per request, so connections are reused.
 - Do not call synchronous requests inside async endpoints: it blocks the event loop.
 - For long jobs after a webhook use BackgroundTasks or a queue; the response must go out within 10 seconds.
+- Need one fixed coin instead of the customer's choice? Add network (and asset when currency is USD) to the same request, for example "network": "TRON", "asset": "USDT": that is the classic payment in one coin. The checkout above is the recommended flow.
 
 ## FAQ
 
 **Should I model the events with Pydantic?**
 
-You can, after verifying the signature: run verify_moonvex on the raw bytes first, then Event.model_validate_json(raw). An event has id, type, apiVersion, createdAt and data holding the payment object.
+You can, after verifying the signature: run verify_moonvex on the raw bytes first, then Event.model_validate_json(raw). An event has id, type, apiVersion, createdAt and data holding the payment object (data.id is pay_…, data.orderId is your order number).
 
 **What if the customer does not pay in time?**
 
-The payment moves to EXPIRED and you receive payment.expired. You can create a new payment for the same orderId with a new Idempotency-Key (for example, bump the attempt number at the end of the key). The payment window is set with expiresInMinutes: 5 to 1440 minutes, 30 by default.
+The checkout is valid until expiresAt; the window is set with expiresInMinutes, 5 to 1440 minutes, 30 by default. If the customer started a payment and did not pay it in time, it moves to EXPIRED and you receive payment.expired. To let them try again, create a new checkout with a new Idempotency-Key (for example, bump the attempt number at the end of the key); if the API answers DUPLICATE_ORDER, that order number is closed, so use a new orderId such as 1001-2.
 
 **Is there a test mode or a sandbox?**
 

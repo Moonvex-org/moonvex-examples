@@ -16,7 +16,7 @@ class Order(models.Model):
     user = models.ForeignKey("auth.User", on_delete=models.PROTECT)
     total = models.DecimalField(max_digits=18, decimal_places=2)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.NEW)
-    moonvex_payment_id = models.CharField(max_length=64, blank=True)
+    moonvex_checkout_id = models.CharField(max_length=64, blank=True)  # inv_…
 
 
 class ProcessedEvent(models.Model):

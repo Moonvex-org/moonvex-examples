@@ -27,5 +27,6 @@ $event = json_decode($raw, true);
 if (in_array($event['type'], ['payment.confirmed', 'payment.overpaid'], true)) {
   mark_paid_once($event['id'], $event['data']['orderId']);
 }
+// payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
 http_response_code(200);
 echo 'ok';

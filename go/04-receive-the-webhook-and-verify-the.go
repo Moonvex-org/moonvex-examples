@@ -79,5 +79,6 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
 	w.WriteHeader(http.StatusOK)
 }

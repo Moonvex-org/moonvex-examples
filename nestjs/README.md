@@ -1,6 +1,6 @@
 # Accept crypto payments in NestJS
 
-How to accept USDT, BTC and other coins in a NestJS app: a provider wrapping the SDK, a controller that redirects to the payment page, and a webhook controller that reads req.rawBody and verifies the HMAC signature.
+How to accept USDT, BTC and other coins in a NestJS app: a provider wrapping the SDK, a controller that redirects to the checkout page where the customer picks the coin, and a webhook controller that reads req.rawBody and verifies the HMAC signature.
 
 Full guide with explanations: https://moonvex.org/en/guides/nestjs?utm_source=github&utm_medium=repo&utm_campaign=nestjs
 
@@ -20,22 +20,28 @@ MOONVEX_WEBHOOK_SECRET=whsec_...
 
 ## 2. Create a service and a payment controller
 
-MoonvexService wraps the SDK client; the controller loads the order and creates a payment with an idempotencyKey built from the order number. @Redirect() combined with a returned { url, statusCode: 303 } sends the customer to the payment page.
+MoonvexService wraps the SDK client; the controller loads the order and creates a checkout with checkouts.create and an idempotencyKey built from the order number. There is no network in the request: the customer picks the coin and network on the Moonvex page. description is shown as “You are paying for”, returnUrl is where the Back buttons lead. @Redirect() combined with a returned { url, statusCode: 303 } sends the customer to the checkout.
 
 File: [`02-create-a-service-and-a-payment.ts`](./02-create-a-service-and-a-payment.ts)
 
 ```ts
 // moonvex.service.ts
 import { Injectable } from '@nestjs/common';
-import { Moonvex, type Payment } from '@moonvex/node';
+import { Moonvex, type Checkout } from '@moonvex/node';
 
 @Injectable()
 export class MoonvexService {
   readonly client = new Moonvex({ apiKey: process.env.MOONVEX_SECRET_KEY! });
 
-  createPayment(orderId: string, amount: string, attempt = 1): Promise<Payment> {
-    return this.client.payments.create(
-      { orderId, amount, currency: 'USDT', network: 'TRON' },
+  createCheckout(orderId: string, amount: string, attempt = 1): Promise<Checkout> {
+    return this.client.checkouts.create(
+      {
+        orderId,
+        amount,
+        currency: 'USD', // the customer picks the coin and network on the checkout page
+        description: 'Order #' + orderId, // shown as “You are paying for”
+        returnUrl: 'https://shop.example.com/orders/' + orderId, // the Back buttons
+      },
       { idempotencyKey: 'order-' + orderId + '-' + attempt },
     );
   }
@@ -57,15 +63,15 @@ export class OrdersController {
   @Redirect()
   async pay(@Param('id') id: string) {
     const order = await this.orders.findOne(id); // your orders service; total is a string
-    const payment = await this.moonvex.createPayment(String(order.id), order.total);
-    return { url: payment.paymentUrl, statusCode: 303 };
+    const checkout = await this.moonvex.createCheckout(String(order.id), order.total);
+    return { url: checkout.paymentUrl, statusCode: 303 };
   }
 }
 ```
 
 ## 3. Send the customer to paymentUrl
 
-paymentUrl is a hosted payment page: the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Open it with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook or the status from GET /v1/payments/:id.
+paymentUrl is the Moonvex checkout page: the customer picks the coin and network, then sees the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Your description is shown as “You are paying for”, and the Back and “Back to the shop” buttons lead to returnUrl. If you know the customer's language, add ?lang=ru, ?lang=uk or ?lang=en to paymentUrl; otherwise the page picks the language itself. Open the page with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook.
 
 ## 4. Receive the webhook and verify the signature
 
@@ -107,6 +113,7 @@ export class MoonvexWebhookController {
     if (event.type === 'payment.confirmed' || event.type === 'payment.overpaid') {
       await this.orders.markPaidOnce(event.id, event.data.orderId!);
     }
+    // payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
     return { received: true };
   }
 }
@@ -114,7 +121,7 @@ export class MoonvexWebhookController {
 
 ## 5. Mark the order paid exactly once
 
-A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. The example uses a TypeORM transaction: INSERT … ON CONFLICT DO NOTHING RETURNING plus the order update. With Prisma, do the same with $transaction and a unique key.
+A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. Events arrive for the payment the customer starts: data.id is its pay_… id and data.orderId is your order number. If the customer switches coins, the previous payment gets payment.cancelled: do not cancel the order on it while the checkout is open. The example uses a TypeORM transaction: INSERT … ON CONFLICT DO NOTHING RETURNING plus the order update. With Prisma, do the same with $transaction and a unique key.
 
 File: [`05-mark-the-order-paid-exactly-once.ts`](./05-mark-the-order-paid-exactly-once.ts)
 
@@ -154,6 +161,8 @@ Moonvex has no test network: everything runs on mainnets. The “Send test” bu
 - If you have a global AuthGuard, mark the webhook controller as public (for example with your own @Public() decorator): Moonvex does not send your JWT.
 - Nest answers POST with 201 by default. That is still a successful 2xx, but @HttpCode(200) makes the response explicit.
 - The WebhookEvent<Payment> type from the SDK gives you autocompletion on event.data: orderId, status, amount, pricing.
+- If you know the customer's language, return withLanguage(checkout.paymentUrl, 'en') from @moonvex/node: it adds ?lang= (ru, uk or en) to the checkout link.
+- Need one fixed coin instead of the customer's choice? client.payments.create with network (and asset when currency is USD), for example network: 'TRON', asset: 'USDT', still works. The checkout above is the recommended flow.
 
 ## FAQ
 
@@ -163,7 +172,7 @@ Yes. The logic is the same: take req.rawBody and the moonvex-signature header an
 
 **What if the customer does not pay in time?**
 
-The payment moves to EXPIRED and you receive payment.expired. You can create a new payment for the same orderId with a new Idempotency-Key (for example, bump the attempt number at the end of the key). The payment window is set with expiresInMinutes: 5 to 1440 minutes, 30 by default.
+The checkout is valid until expiresAt; the window is set with expiresInMinutes, 5 to 1440 minutes, 30 by default. If the customer started a payment and did not pay it in time, it moves to EXPIRED and you receive payment.expired. To let them try again, create a new checkout with a new Idempotency-Key (for example, bump the attempt number at the end of the key); if the API answers DUPLICATE_ORDER, that order number is closed, so use a new orderId such as 1001-2.
 
 **Is there a test mode or a sandbox?**
 

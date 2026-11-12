@@ -16,21 +16,27 @@ def db() -> sqlite3.Connection:
     return conn
 
 
-def create_payment(order_id: int, amount: str, attempt: int = 1) -> dict:
+def create_checkout(order_id: int, amount: str, attempt: int = 1) -> dict:
     r = requests.post(
         API + "/v1/payments",
         headers={
             "Authorization": "Bearer " + os.environ["MOONVEX_SECRET_KEY"],
-            # a retry with the same key never creates a second invoice
+            # a retry with the same key never creates a second checkout
             "Idempotency-Key": f"order-{order_id}-{attempt}",
         },
-        json={"orderId": str(order_id), "amount": amount, "currency": "USDT", "network": "TRON"},
+        json={
+            "orderId": str(order_id),
+            "amount": amount,
+            "currency": "USD",  # no network: the customer picks the coin on the checkout page
+            "description": f"Order #{order_id}",  # shown as “You are paying for”
+            "returnUrl": f"https://shop.example.com/orders/{order_id}",  # the Back buttons
+        },
         timeout=15,
     )
-    payment = r.json()
+    checkout = r.json()
     if r.status_code >= 400:
-        raise RuntimeError(payment["error"]["code"] + ": " + payment["error"]["message"])
-    return payment
+        raise RuntimeError(checkout["error"]["code"] + ": " + checkout["error"]["message"])
+    return checkout  # {"object": "checkout", "id": "inv_…", "paymentUrl": …}
 
 
 @app.post("/orders/<int:order_id>/pay")
@@ -40,5 +46,5 @@ def pay(order_id: int):
     if order is None:
         abort(404)
     # total is stored as TEXT "25.00", so the amount is sent as a string
-    payment = create_payment(order["id"], str(order["total"]))
-    return redirect(payment["paymentUrl"], code=303)
+    checkout = create_checkout(order["id"], str(order["total"]))
+    return redirect(checkout["paymentUrl"], code=303)

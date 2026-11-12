@@ -10,7 +10,7 @@ public class MoonvexClient {
                 .build();
     }
 
-    public JsonNode createPayment(long orderId, BigDecimal amount, int attempt) {
+    public JsonNode createCheckout(long orderId, BigDecimal amount, int attempt) {
         return http.post()
                 .uri("/v1/payments")
                 .header("Idempotency-Key", "order-" + orderId + "-" + attempt)
@@ -18,10 +18,11 @@ public class MoonvexClient {
                 .body(Map.of(
                         "orderId", String.valueOf(orderId),
                         "amount", amount.toPlainString(), // BigDecimal → "25.00", not a double
-                        "currency", "USDT",
-                        "network", "TRON"))
+                        "currency", "USD", // no network: the customer picks the coin on the checkout page
+                        "description", "Order #" + orderId, // shown as “You are paying for”
+                        "returnUrl", "https://shop.example.com/orders/" + orderId)) // the Back buttons
                 .retrieve()
-                .body(JsonNode.class);
+                .body(JsonNode.class); // {"object": "checkout", "id": "inv_…", "paymentUrl": …}
     }
 }
 
@@ -39,9 +40,9 @@ public class PayController {
     @PostMapping("/orders/{id}/pay")
     public ResponseEntity<Void> pay(@PathVariable long id) {
         Order order = orders.findById(id).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
-        JsonNode payment = moonvex.createPayment(order.getId(), order.getTotal(), 1);
+        JsonNode checkout = moonvex.createCheckout(order.getId(), order.getTotal(), 1);
         return ResponseEntity.status(HttpStatus.SEE_OTHER)
-                .location(URI.create(payment.get("paymentUrl").asText()))
+                .location(URI.create(checkout.get("paymentUrl").asText()))
                 .build();
     }
 }

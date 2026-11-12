@@ -19,6 +19,7 @@ class MoonvexWebhookController extends Controller
         if (in_array($event['type'], ['payment.confirmed', 'payment.overpaid'], true)) {
             Order::markPaidOnce($event['id'], $event['data']['orderId']);
         }
+        // payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
 
         return response('ok');
     }

@@ -23,4 +23,5 @@ async def moonvex_webhook(request: Request):
     event = json.loads(raw)
     if event["type"] in ("payment.confirmed", "payment.overpaid"):
         await mark_paid_once(request.app.state.db, event["id"], event["data"]["orderId"])
+    # payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
     return {"received": True}

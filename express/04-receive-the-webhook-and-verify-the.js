@@ -27,6 +27,7 @@ app.post('/moonvex/webhook', express.raw({ type: 'application/json' }), async (r
     if (event.type === 'payment.confirmed' || event.type === 'payment.overpaid') {
       await markOrderPaidOnce(event.id, event.data.orderId);
     }
+    // payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
     res.sendStatus(200);
   } catch (err) {
     next(err); // a 5xx makes Moonvex retry later

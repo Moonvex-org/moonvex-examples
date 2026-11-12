@@ -1,6 +1,6 @@
 # Accept crypto payments in Ruby on Rails
 
-How to accept crypto in a Rails app: a small Net::HTTP module creates the payment, a controller sends the customer to the payment page, and the webhook controller verifies the signature over request.raw_post and marks the order once.
+How to accept crypto in a Rails app: a small Net::HTTP module creates a checkout, a controller sends the customer to the page where they pick the coin, and the webhook controller verifies the signature over request.raw_post and marks the order once.
 
 Full guide with explanations: https://moonvex.org/en/guides/ruby-rails?utm_source=github&utm_medium=repo&utm_campaign=ruby-rails
 
@@ -18,11 +18,11 @@ export MOONVEX_WEBHOOK_SECRET=whsec_...
 bin/rails g model ProcessedEvent event_id:string:uniq
 ```
 
-## 2. Create a payment
+## 2. Create a checkout
 
-The Moonvex module sends POST /v1/payments with Net::HTTP. The amount is BigDecimal#to_s("F"), a string without an exponent. In Rails 7+ an external redirect needs allow_other_host: true.
+The Moonvex module sends POST /v1/payments with Net::HTTP. The request has no network, so Moonvex creates a checkout where the customer picks the coin and network. description is shown as “You are paying for”, returnUrl (order_url, https only) is where the Back buttons lead. The amount is BigDecimal#to_s("F"), a string without an exponent. In Rails 7+ an external redirect needs allow_other_host: true.
 
-File: [`02-create-a-payment.rb`](./02-create-a-payment.rb)
+File: [`02-create-a-checkout.rb`](./02-create-a-checkout.rb)
 
 ```ruby
 # app/services/moonvex.rb
@@ -32,13 +32,17 @@ require "json"
 module Moonvex
   API = URI("https://api.moonvex.org")
 
-  def self.create_payment(order_id:, amount:, attempt: 1)
+  def self.create_checkout(order_id:, amount:, description:, return_url:, attempt: 1)
     uri = URI.join(API, "/v1/payments")
     req = Net::HTTP::Post.new(uri,
       "Authorization" => "Bearer #{ENV.fetch('MOONVEX_SECRET_KEY')}",
       "Idempotency-Key" => "order-#{order_id}-#{attempt}",
       "Content-Type" => "application/json")
-    req.body = { orderId: order_id.to_s, amount: amount, currency: "USDT", network: "TRON" }.to_json
+    # no network: the customer picks the coin and network on the checkout page
+    req.body = {
+      orderId: order_id.to_s, amount: amount, currency: "USD",
+      description: description, returnUrl: return_url
+    }.to_json
 
     res = Net::HTTP.start(uri.host, uri.port, use_ssl: true, read_timeout: 15) { |http| http.request(req) }
     body = JSON.parse(res.body)
@@ -52,18 +56,22 @@ end
 class OrdersController < ApplicationController
   def pay
     order = current_user.orders.find(params[:id])
-    # BigDecimal → a "25.0" string, no Float
-    payment = Moonvex.create_payment(order_id: order.id, amount: order.total.to_s("F"))
-    order.update!(moonvex_payment_id: payment["id"])
+    checkout = Moonvex.create_checkout(
+      order_id: order.id,
+      amount: order.total.to_s("F"), # BigDecimal → a "25.0" string, no Float
+      description: "Order ##{order.id}", # shown as “You are paying for”
+      return_url: order_url(order, protocol: "https") # the Back buttons
+    )
+    order.update!(moonvex_checkout_id: checkout["id"]) # inv_…
     # Rails 7+: an external redirect must be allowed explicitly
-    redirect_to payment["paymentUrl"], allow_other_host: true, status: :see_other
+    redirect_to checkout["paymentUrl"], allow_other_host: true, status: :see_other
   end
 end
 ```
 
 ## 3. Send the customer to paymentUrl
 
-paymentUrl is a hosted payment page: the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Open it with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook or the status from GET /v1/payments/:id.
+paymentUrl is the Moonvex checkout page: the customer picks the coin and network, then sees the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Your description is shown as “You are paying for”, and the Back and “Back to the shop” buttons lead to returnUrl. If you know the customer's language, add ?lang=ru, ?lang=uk or ?lang=en to paymentUrl; otherwise the page picks the language itself. Open the page with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook.
 
 ## 4. Receive the webhook and verify the signature
 
@@ -85,6 +93,7 @@ class MoonvexWebhooksController < ApplicationController
     if %w[payment.confirmed payment.overpaid].include?(event["type"])
       Order.mark_paid_once!(event["id"], event.dig("data", "orderId"))
     end
+    # payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
     head :ok
   end
 
@@ -104,11 +113,12 @@ end
 # config/routes.rb
 post "/moonvex/webhook", to: "moonvex_webhooks#create"
 post "/orders/:id/pay", to: "orders#pay", as: :pay_order
+resources :orders, only: :show # order_url for returnUrl
 ```
 
 ## 5. Mark the order paid exactly once
 
-A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. A unique index on event_id: a repeat raises ActiveRecord::RecordNotUnique, the transaction rolls back and the order stays untouched.
+A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. Events arrive for the payment the customer starts: data.id is its pay_… id and data.orderId is your order number. If the customer switches coins, the previous payment gets payment.cancelled: do not cancel the order on it while the checkout is open. A unique index on event_id: a repeat raises ActiveRecord::RecordNotUnique, the transaction rolls back and the order stays untouched.
 
 File: [`05-mark-the-order-paid-exactly-once.rb`](./05-mark-the-order-paid-exactly-once.rb)
 
@@ -137,6 +147,8 @@ Moonvex has no test network: everything runs on mainnets. The “Send test” bu
 - Do not use params for signature checks: that is already parsed data.
 - Without allow_other_host: true, Rails 7 raises UnsafeRedirectError when redirecting to pay.moonvex.org.
 - Send heavy work to Active Job after responding with head :ok.
+- With I18n you know the customer's language: redirect to checkout["paymentUrl"] + "?lang=#{I18n.locale}" when the locale is ru, uk or en, so the checkout opens in the same language.
+- Need one fixed coin instead of the customer's choice? Add network (and asset when currency is USD) to the same request, for example network: "TRON", asset: "USDT": that is the classic payment in one coin. The checkout above is the recommended flow.
 
 ## FAQ
 
@@ -144,9 +156,9 @@ Moonvex has no test network: everything runs on mainnets. The “Send test” bu
 
 Yes. All you need is POST /v1/payments with JSON and the Authorization: Bearer and Idempotency-Key headers. The example uses Net::HTTP to avoid adding gems.
 
-**Why is amount in the response higher than the order price?**
+**Why is amount in the webhook higher than the order price?**
 
-The customer pays the Moonvex fee on top, so amount is the total due. Your price stays in pricing.amount, and what you receive on a full payment is in merchantAmount. Reconcile orders by orderId and pricing.amount, and show the customer amount.
+The checkout returns your price as is in amount and currency. The payment the customer starts (data in webhooks) is in the chosen coin, and its amount is the total due including the Moonvex fee on top. Your price stays in pricing.amount, and what you receive on a full payment is in merchantAmount. Reconcile orders by orderId and pricing.amount.
 
 **Is there a test mode or a sandbox?**
 

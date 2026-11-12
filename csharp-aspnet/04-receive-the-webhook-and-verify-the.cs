@@ -17,6 +17,7 @@ app.MapPost("/moonvex/webhook", async (HttpRequest request, AppDb db, IConfigura
         var orderId = long.Parse(ev.GetProperty("data").GetProperty("orderId").GetString()!, CultureInfo.InvariantCulture);
         await OrderPayments.MarkPaidOnceAsync(db, ev.GetProperty("id").GetString()!, orderId);
     }
+    // payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
     return Results.Ok();
 });
 

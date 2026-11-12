@@ -24,6 +24,7 @@ public class MoonvexWebhookController {
         if (type.equals("payment.confirmed") || type.equals("payment.overpaid")) {
             orders.markPaidOnce(event.path("id").asText(), event.path("data").path("orderId").asText());
         }
+        // payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
         return ResponseEntity.ok("ok");
     }
 

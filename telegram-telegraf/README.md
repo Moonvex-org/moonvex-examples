@@ -1,6 +1,6 @@
 # Accept crypto payments in a Telegraf Telegram bot
 
-A Telegraf bot issues an invoice on /buy through the @moonvex/node SDK and sends a pay button, while an Express server receives the Moonvex webhook, verifies the signature and messages the customer. Bots with a balance get a permanent top-up address.
+A Telegraf bot creates a checkout on /buy with checkouts.create from @moonvex/node and sends a pay button (the customer picks the coin and network on the page), while an Express server receives the Moonvex webhook, verifies the signature and messages the customer. Bots with a balance get a permanent top-up address.
 
 Full guide with explanations: https://moonvex.org/en/guides/telegram-telegraf?utm_source=github&utm_medium=repo&utm_campaign=telegram-telegraf
 
@@ -22,14 +22,14 @@ DATABASE_URL=postgres://user:pass@localhost:5432/bot
 
 ## 2. Issue an invoice on /buy
 
-moonvex.payments.create with orderId from the chat and message, customerId as the user id and chatId in metadata. Metadata comes back in the webhook. idempotencyKey prevents a second invoice if the user repeats the command on a slow connection.
+moonvex.checkouts.create creates a checkout: there is no network, so the customer picks the coin and network on the Moonvex page. orderId comes from the chat and message, customerId is the user id and chatId goes into metadata, which comes back in the webhook. description is shown as “You are paying for”, and returnUrl is the bot link https://t.me/<bot_username> (ctx.botInfo.username), so the Back buttons return the customer to the chat. withLanguage picks the checkout language from the user's language_code: ru or uk, otherwise en. idempotencyKey prevents a second checkout if the user repeats the command on a slow connection.
 
 File: [`02-issue-an-invoice-on-buy.js`](./02-issue-an-invoice-on-buy.js)
 
 ```js
 // bot.js
 import { Markup, Telegraf } from 'telegraf';
-import { Moonvex } from '@moonvex/node';
+import { Moonvex, withLanguage } from '@moonvex/node';
 
 export const bot = new Telegraf(process.env.BOT_TOKEN);
 export const moonvex = new Moonvex({ apiKey: process.env.MOONVEX_SECRET_KEY });
@@ -37,20 +37,24 @@ export const moonvex = new Moonvex({ apiKey: process.env.MOONVEX_SECRET_KEY });
 bot.command('buy', async (ctx) => {
   // a unique order id: chat + message
   const orderId = 'tg-' + ctx.chat.id + '-' + ctx.message.message_id;
-  const payment = await moonvex.payments.create(
+  const checkout = await moonvex.checkouts.create(
     {
       orderId,
       amount: '10',
-      currency: 'USDT',
-      network: 'TRON',
+      currency: 'USD', // no network: the customer picks the coin on the checkout page
+      description: 'Premium access for 30 days', // shown as “You are paying for”
+      returnUrl: 'https://t.me/' + ctx.botInfo.username, // the Back buttons lead back to the bot
       customerId: String(ctx.from.id),
       metadata: { chatId: ctx.chat.id }, // comes back in the webhook
     },
     { idempotencyKey: orderId + '-1' },
   );
+  // checkout language from the Telegram user's language
+  const code = (ctx.from.language_code || '').slice(0, 2);
+  const lang = code === 'ru' || code === 'uk' ? code : 'en';
   await ctx.reply(
-    'Amount due: ' + payment.amount + ' ' + payment.asset + ' (' + payment.network + ')',
-    Markup.inlineKeyboard([Markup.button.url('Pay', payment.paymentUrl)]),
+    'To pay: ' + checkout.amount + ' ' + checkout.currency + '. Choose the coin and network on the next page.',
+    Markup.inlineKeyboard([Markup.button.url('Pay', withLanguage(checkout.paymentUrl, lang))]),
   );
 });
 
@@ -62,7 +66,7 @@ bot.catch((err, ctx) => {
 
 ## 3. Send the pay button
 
-Markup.button.url opens paymentUrl, a hosted payment page with the amount, address and QR code. It opens in the browser and cannot be embedded in a frame. Show the customer amount from the response: that is the total including the fee.
+Markup.button.url opens paymentUrl, the Moonvex checkout page. There the customer picks the coin and network and sees the exact amount including the fee, the address and a QR code; until funds arrive they can switch to another coin. The page opens in the browser and cannot be embedded in a frame. The Back and “Back to the shop” buttons lead to returnUrl, the bot chat. The checkout response carries your price (amount and currency); the total in the chosen coin is shown on the page.
 
 ## 4. Receive the webhook and verify the signature
 
@@ -94,6 +98,7 @@ app.post('/moonvex/webhook', express.raw({ type: 'application/json' }), async (r
       'Payment received, thank you! Order ' + event.data.orderId,
     );
   }
+  // payment.cancelled also arrives when the customer switches coins: ignore it, the checkout stays open
   res.sendStatus(200);
 });
 
@@ -103,7 +108,7 @@ bot.launch();
 
 ## 5. Mark the order paid exactly once
 
-A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. claimEvent returns true only on the first insert of the event id, so the payment message never goes out twice.
+A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. Events arrive for the payment the customer starts: data.id is its pay_… id and data.orderId is your order number. If the customer switches coins, the previous payment gets payment.cancelled: do not cancel the order on it while the checkout is open. claimEvent returns true only on the first insert of the event id, so the payment message never goes out twice.
 
 File: [`05-mark-the-order-paid-exactly-once.js`](./05-mark-the-order-paid-exactly-once.js)
 
@@ -150,6 +155,7 @@ if (event.type === 'deposit.confirmed' && (await claimEvent(event.id))) {
 - bot.catch handles API errors (such as MoonvexError) and keeps the bot alive.
 - Never deliver goods on a button press; only on payment.confirmed / payment.overpaid.
 - There is no test network: test the bot with a 1 USDT payment on TRON and the “Send test” button in the dashboard.
+- Need one fixed coin instead of the customer's choice? moonvex.payments.create with network (and asset when currency is USD), for example network: 'TRON', asset: 'USDT', still works. The checkout above is the recommended flow.
 
 ## FAQ
 
@@ -163,7 +169,7 @@ No. The customer pays in crypto on the Moonvex payment page and the money lands 
 
 **What if the customer does not pay in time?**
 
-The payment moves to EXPIRED and you receive payment.expired. You can create a new payment for the same orderId with a new Idempotency-Key (for example, bump the attempt number at the end of the key). The payment window is set with expiresInMinutes: 5 to 1440 minutes, 30 by default.
+The checkout is valid until expiresAt; the window is set with expiresInMinutes, 5 to 1440 minutes, 30 by default. If the customer started a payment and did not pay it in time, it moves to EXPIRED and you receive payment.expired. To let them try again, create a new checkout with a new Idempotency-Key (for example, bump the attempt number at the end of the key); if the API answers DUPLICATE_ORDER, that order number is closed, so use a new orderId such as 1001-2.
 
 ---
 

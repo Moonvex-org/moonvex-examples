@@ -1,6 +1,6 @@
 # Accept crypto payments in Express
 
-A Moonvex integration for an Express app with no extra dependencies: the built-in fetch creates payments, node:crypto verifies webhook signatures, and a PostgreSQL transaction marks each order paid exactly once.
+A Moonvex integration for an Express app with no extra dependencies: the built-in fetch creates a checkout where the customer picks the coin and network, node:crypto verifies webhook signatures, and a PostgreSQL transaction marks each order paid exactly once.
 
 Full guide with explanations: https://moonvex.org/en/guides/express?utm_source=github&utm_medium=repo&utm_campaign=express
 
@@ -19,11 +19,11 @@ MOONVEX_WEBHOOK_SECRET=whsec_...
 DATABASE_URL=postgres://user:pass@localhost:5432/shop
 ```
 
-## 2. Create a payment
+## 2. Create a checkout
 
-POST /v1/payments with the Authorization: Bearer and Idempotency-Key headers. Required fields are orderId, amount (as a string), currency and network; for a USD price add asset, the coin to pay with. A 201 response returns the payment object with id, amount and paymentUrl. Errors share one format: error.code, error.message and requestId.
+POST /v1/payments with the Authorization: Bearer and Idempotency-Key headers (8 to 128 characters). Required fields are orderId, amount (as a string) and currency: USD or a coin such as USDT. Without network and asset Moonvex creates a checkout where the customer picks the coin and network. description is shown to the customer as “You are paying for”, returnUrl (https only) is where the Back buttons lead. A 201 response returns an object with object: "checkout", id (inv_…), status AWAITING_SELECTION and paymentUrl. Errors share one format: error.code, error.message and requestId.
 
-File: [`02-create-a-payment.js`](./02-create-a-payment.js)
+File: [`02-create-a-checkout.js`](./02-create-a-checkout.js)
 
 ```js
 // server.js
@@ -32,7 +32,7 @@ import { db } from './db.js';
 
 const app = express();
 
-async function createPayment(order, attempt = 1) {
+async function createCheckout(order, attempt = 1) {
   const res = await fetch('https://api.moonvex.org/v1/payments', {
     method: 'POST',
     headers: {
@@ -43,22 +43,23 @@ async function createPayment(order, attempt = 1) {
     body: JSON.stringify({
       orderId: String(order.id),
       amount: order.total, // a "25.00" string from numeric, no floats
-      currency: 'USDT',
-      network: 'TRON',
+      currency: 'USD', // no network: the customer picks the coin on the checkout page
+      description: 'Order #' + order.id, // shown as “You are paying for”
+      returnUrl: 'https://shop.example.com/orders/' + order.id, // the Back buttons
     }),
     signal: AbortSignal.timeout(15000),
   });
-  const payment = await res.json();
-  if (!res.ok) throw new Error(payment.error.code + ': ' + payment.error.message);
-  return payment;
+  const checkout = await res.json();
+  if (!res.ok) throw new Error(checkout.error.code + ': ' + checkout.error.message);
+  return checkout; // { object: 'checkout', id: 'inv_…', status: 'AWAITING_SELECTION', paymentUrl, … }
 }
 
 app.post('/orders/:id/pay', async (req, res, next) => {
   try {
     const { rows } = await db.query('SELECT id, total::text AS total FROM orders WHERE id = $1', [req.params.id]);
     if (!rows[0]) return res.sendStatus(404);
-    const payment = await createPayment(rows[0]);
-    res.redirect(303, payment.paymentUrl);
+    const checkout = await createCheckout(rows[0]);
+    res.redirect(303, checkout.paymentUrl);
   } catch (err) {
     next(err);
   }
@@ -67,7 +68,7 @@ app.post('/orders/:id/pay', async (req, res, next) => {
 
 ## 3. Send the customer to paymentUrl
 
-paymentUrl is a hosted payment page: the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Open it with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook or the status from GET /v1/payments/:id. In Express that is res.redirect(303, payment.paymentUrl).
+paymentUrl is the Moonvex checkout page: the customer picks the coin and network, then sees the exact amount including the fee, the address, a QR code, the official token contract and a timer, with a status that updates by itself. Your description is shown as “You are paying for”, and the Back and “Back to the shop” buttons lead to returnUrl. If you know the customer's language, add ?lang=ru, ?lang=uk or ?lang=en to paymentUrl; otherwise the page picks the language itself. Open the page with a redirect or in a new tab; it cannot be embedded in an iframe. A customer returning to your site is not proof of payment: mark the order paid only from a webhook. In Express that is res.redirect(303, payment.paymentUrl).
 
 ## 4. Receive the webhook and verify the signature
 
@@ -105,6 +106,7 @@ app.post('/moonvex/webhook', express.raw({ type: 'application/json' }), async (r
     if (event.type === 'payment.confirmed' || event.type === 'payment.overpaid') {
       await markOrderPaidOnce(event.id, event.data.orderId);
     }
+    // payment.cancelled also arrives when the customer switches coins: do not cancel the order on it
     res.sendStatus(200);
   } catch (err) {
     next(err); // a 5xx makes Moonvex retry later
@@ -118,7 +120,7 @@ app.listen(3000);
 
 ## 5. Mark the order paid exactly once
 
-A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. If processing fails, pass the error to next: a 5xx response makes Moonvex retry the delivery later.
+A redelivered event keeps the same id, so store it in a table with a unique key in the same transaction as the order update: a duplicate then changes nothing. Fulfil on payment.confirmed and payment.overpaid, never on payment.detected. Events arrive for the payment the customer starts: data.id is its pay_… id and data.orderId is your order number. If the customer switches coins, the previous payment gets payment.cancelled: do not cancel the order on it while the checkout is open. If processing fails, pass the error to next: a 5xx response makes Moonvex retry the delivery later.
 
 File: [`05-mark-the-order-paid-exactly-once.js`](./05-mark-the-order-paid-exactly-once.js)
 
@@ -169,16 +171,17 @@ Moonvex has no test network: everything runs on mainnets. The “Send test” bu
 - Never compare signatures with ===. Use crypto.timingSafeEqual after checking the buffer lengths match.
 - Moonvex retries a 4xx response (except 408 and 429) only 3 times. Return 5xx for temporary failures and 400 only for a bad signature.
 - Protect the payment route with your usual CSRF protection and the webhook with the signature only: Moonvex does not have your cookies or tokens.
+- Need one fixed coin instead of the customer's choice? Add network (and asset when currency is USD) to the same request, for example "network": "TRON", "asset": "USDT": that is the classic payment in one coin, and the page opens straight on the address. The checkout above is the recommended flow.
 
 ## FAQ
 
 **How is the Express version different from the SDK?**
 
-The protocol is the same: the same POST /v1/payments and the same signature scheme. Here everything is written by hand, which suits you if you want no extra packages. With @moonvex/node verification is a single verifyWebhook call.
+The protocol is the same: the same POST /v1/payments and the same signature scheme. Here everything is written by hand, which suits you if you want no extra packages. With @moonvex/node the checkout is moonvex.checkouts.create and verification is a single verifyWebhook call.
 
-**Why is amount in the response higher than the order price?**
+**Why is amount in the webhook higher than the order price?**
 
-The customer pays the Moonvex fee on top, so amount is the total due. Your price stays in pricing.amount, and what you receive on a full payment is in merchantAmount. Reconcile orders by orderId and pricing.amount, and show the customer amount.
+The checkout returns your price as is in amount and currency. The payment the customer starts (data in webhooks) is in the chosen coin, and its amount is the total due including the Moonvex fee on top. Your price stays in pricing.amount, and what you receive on a full payment is in merchantAmount. Reconcile orders by orderId and pricing.amount.
 
 **Is there a test mode or a sandbox?**
 

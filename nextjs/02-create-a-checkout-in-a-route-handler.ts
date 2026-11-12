@@ -14,10 +14,16 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const order = rows[0];
   if (!order) return new Response('not found', { status: 404 });
 
-  const payment = await moonvex.payments.create(
-    { orderId: String(order.id), amount: order.total, currency: 'USDT', network: 'TRON' },
+  const checkout = await moonvex.checkouts.create(
+    {
+      orderId: String(order.id),
+      amount: order.total,
+      currency: 'USD', // the customer picks the coin and network on the checkout page
+      description: 'Order #' + order.id, // shown as “You are paying for”
+      returnUrl: 'https://shop.example.com/orders/' + order.id, // the Back buttons
+    },
     { idempotencyKey: 'order-' + order.id + '-1' },
   );
-  // a method="post" form → 303 to the payment page
-  return NextResponse.redirect(payment.paymentUrl, 303);
+  // a method="post" form → 303 to the checkout page
+  return NextResponse.redirect(checkout.paymentUrl, 303);
 }

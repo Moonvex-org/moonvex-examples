@@ -20,15 +20,16 @@ curl_setopt_array($ch, [
   CURLOPT_POSTFIELDS => json_encode([
     'orderId' => (string) $order['id'],
     'amount' => (string) $order['total'], // DECIMAL from PDO is already a "25.00" string
-    'currency' => 'USDT',
-    'network' => 'TRON',
+    'currency' => 'USD', // no network: the customer picks the coin on the checkout page
+    'description' => 'Order #' . $order['id'], // shown as “You are paying for”
+    'returnUrl' => 'https://shop.example.com/orders/' . $order['id'], // the Back buttons
   ]),
 ]);
-$payment = json_decode(curl_exec($ch), true);
+$checkout = json_decode(curl_exec($ch), true);
 $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-if ($status >= 400 || !$payment) {
+if ($status >= 400 || !$checkout) {
   http_response_code(502);
-  exit('Moonvex: ' . ($payment['error']['code'] ?? 'network error'));
+  exit('Moonvex: ' . ($checkout['error']['code'] ?? 'network error'));
 }
 
-header('Location: ' . $payment['paymentUrl'], true, 303);
+header('Location: ' . $checkout['paymentUrl'], true, 303);

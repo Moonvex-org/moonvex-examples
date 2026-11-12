@@ -20,13 +20,13 @@ var (
 	httpClient = &http.Client{Timeout: 15 * time.Second}
 )
 
-type Payment struct {
-	ID         string `json:"id"`
-	Status     string `json:"status"`
+// Checkout is the response of POST /v1/payments without network
+type Checkout struct {
+	ID         string `json:"id"`     // inv_…
+	Status     string `json:"status"` // AWAITING_SELECTION
 	OrderID    string `json:"orderId"`
 	Amount     string `json:"amount"` // amounts are strings, not float64
-	Asset      string `json:"asset"`
-	Network    string `json:"network"`
+	Currency   string `json:"currency"`
 	PaymentURL string `json:"paymentUrl"`
 }
 
@@ -37,9 +37,13 @@ type apiError struct {
 	} `json:"error"`
 }
 
-func createPayment(ctx context.Context, orderID, amount string, attempt int) (*Payment, error) {
+func createCheckout(ctx context.Context, orderID, amount string, attempt int) (*Checkout, error) {
 	body, _ := json.Marshal(map[string]string{
-		"orderId": orderID, "amount": amount, "currency": "USDT", "network": "TRON",
+		"orderId":     orderID,
+		"amount":      amount,
+		"currency":    "USD",                                        // no network: the customer picks the coin on the checkout page
+		"description": "Order #" + orderID,                          // shown as “You are paying for”
+		"returnUrl":   "https://shop.example.com/orders/" + orderID, // the Back buttons
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.moonvex.org/v1/payments", bytes.NewReader(body))
 	if err != nil {
@@ -59,8 +63,8 @@ func createPayment(ctx context.Context, orderID, amount string, attempt int) (*P
 		_ = json.NewDecoder(res.Body).Decode(&e)
 		return nil, fmt.Errorf("moonvex: %s: %s", e.Error.Code, e.Error.Message)
 	}
-	var p Payment
-	return &p, json.NewDecoder(res.Body).Decode(&p)
+	var c Checkout
+	return &c, json.NewDecoder(res.Body).Decode(&c)
 }
 
 func payHandler(w http.ResponseWriter, r *http.Request) {
@@ -72,12 +76,12 @@ func payHandler(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	p, err := createPayment(r.Context(), id, total, 1)
+	c, err := createCheckout(r.Context(), id, total, 1)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	http.Redirect(w, r, p.PaymentURL, http.StatusSeeOther)
+	http.Redirect(w, r, c.PaymentURL, http.StatusSeeOther)
 }
 
 func main() {
