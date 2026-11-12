@@ -33,6 +33,8 @@ Networks: TRON (TRC-20), Ethereum (ERC-20), BNB Smart Chain (BEP-20), Solana, TO
 3. **Receive a webhook**: Moonvex signs every event: header `Moonvex-Signature: t=<unix>,v1=<hex>`, where `v1 = HMAC-SHA256(webhook_secret, t + "." + raw_body)`. Compare in constant time and reject old timestamps.
 4. **Mark the order paid once** on `payment.confirmed` / `payment.overpaid`: store the event id with a unique constraint; deliveries are retried for up to three days. Ignore `payment.cancelled` while the checkout is open: it means the customer switched coins.
 
+**Amounts:** payments start at **$1** on every network. Payouts (`POST /v1/payouts`) carry your percentage plus a fixed network charge (`fee.network`) and have a minimum per coin/network for what the recipient gets (for example 10 USDT on TRON, 5 on BSC/TON/Solana): below it the API returns `AMOUNT_BELOW_MIN_PAYOUT` with `details.minAmount`. Check with `GET /v1/payouts/quote` first.
+
 **Pay without leaving your site:** every payment also returns `qr` (SVG/PNG image URLs), `receiptUrl`, `receiptPdfUrl` and `provider`; `GET /v1/checkouts/{id}` + `POST /v1/checkouts/{id}/select` let the customer pick the coin in your own UI. See [embedded-checkout](./embedded-checkout).
 
 Need a fixed coin? Pass `network` (and `asset` for USD prices): the response is then a payment with its address.
