@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Top up balance</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 480px; margin: 32px auto; padding: 0 16px; color: #131a2e; }
+    button { font: inherit; padding: 10px 14px; border-radius: 10px; border: 1px solid #d5dbe6; background: #fff; cursor: pointer; margin: 4px 4px 0 0; }
+    .addr { font-family: ui-monospace, monospace; word-break: break-all; background: #f3f5f9; padding: 10px; border-radius: 10px; }
+    .muted { color: #6b7590; font-size: 14px; }
+    img.qr { width: 220px; height: 220px; display: block; margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <h1>Top up balance: $50</h1>
+  <div id="step"><button id="start">Pay with crypto</button></div>
+
+  <script>
+    const step = document.getElementById('step');
+    const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+    document.getElementById('start').onclick = async () => {
+      const d = await (await fetch('/api/deposit', { method: 'POST' })).json();
+      step.innerHTML = '<p>Choose a coin and network:</p>' + d.options.map((o, i) =>
+        `<button data-i="${i}">${esc(o.asset)} · ${esc(o.networkName)}${o.tokenStandard ? ' (' + esc(o.tokenStandard) + ')' : ''} — ${esc(o.amount)}</button>`).join('');
+      step.querySelectorAll('button').forEach((b) => b.onclick = () => pick(d.checkoutId, d.options[b.dataset.i]));
+    };
+
+    async function pick(checkoutId, o) {
+      const p = await (await fetch(`/api/deposit/${checkoutId}/select`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ asset: o.asset, network: o.network }),
+      })).json();
+      // Required next to the payment: the processor link, the payment link and the receipt (Moonvex rules, section 4)
+      step.innerHTML = `
+        <p>Send exactly <b>${esc(p.amount)} ${esc(p.asset)}</b> (${esc(p.networkName)}${p.tokenStandard ? ' ' + esc(p.tokenStandard) : ''}) to:</p>
+        <img class="qr" src="${esc(p.qr.imageUrl)}" alt="QR code of the address" />
+        <div class="addr">${esc(p.address)}</div>
+        <p id="status" class="muted">Waiting for the transfer…</p>
+        <p class="muted">
+          <a href="${esc(p.paymentUrl)}" target="_blank" rel="noopener">Payment link</a> ·
+          <a href="${esc(p.receiptUrl)}" target="_blank" rel="noopener">Receipt</a> ·
+          <a href="${esc(p.receiptPdfUrl)}">Download PDF</a><br />
+          Payment processed by <a href="${esc(p.provider.url)}" target="_blank" rel="noopener">${esc(p.provider.name)}</a>
+        </p>`;
+      poll(p.id);
+    }
+
+    async function poll(id) {
+      const s = await (await fetch(`/api/payment/${id}`)).json();
+      const el = document.getElementById('status');
+      if (['CONFIRMED', 'OVERPAID'].includes(s.status)) return (el.textContent = 'Paid. Your balance will be credited.');
+      if (s.status === 'CONFIRMING' || Number(s.receivedAmount) > 0) el.textContent = `Transfer seen, confirmations ${s.confirmations}/${s.requiredConfirmations}…`;
+      if (s.status === 'UNDERPAID') return (el.textContent = `Paid partially: ${s.receivedAmount}. Contact support.`);
+      if (['EXPIRED', 'CANCELLED', 'FAILED'].includes(s.status)) return (el.textContent = 'The payment window is over. Start again.');
+      setTimeout(() => poll(id), 5000);
+    }
+  </script>
+</body>
+</html>
