@@ -1,0 +1,6 @@
+npm install @moonvex/node pg
+
+# .env — server only, never commit it
+MOONVEX_SECRET_KEY=sk_live_...
+MOONVEX_WEBHOOK_SECRET=whsec_...
+DATABASE_URL=postgres://user:pass@localhost:5432/shop
