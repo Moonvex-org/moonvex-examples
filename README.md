@@ -28,18 +28,34 @@ Networks: TRON (TRC-20), Ethereum (ERC-20), BNB Smart Chain (BEP-20), Solana, TO
 
 ## How it works
 
-1. **Create a checkout**: `POST https://api.moonvex.org/v1/payments` with your secret key, an `Idempotency-Key` and `{ orderId, amount, currency: "USD", description, returnUrl }`, without `network`. The response is a checkout (`inv_…`) with `paymentUrl`.
+1. **Create a checkout**: `POST https://api.moonvex.org/v1/payments` with your secret key, an `Idempotency-Key` and `{ orderId, amount, currency: "USD", description, returnUrl }`, without `network`. `currency` can be `USD`, `EUR`, `UAH`, `RUB` or a coin; fiat prices are converted at a rate locked when the customer picks the coin. The response is a checkout (`inv_…`) with `paymentUrl`.
 2. **Send the customer to `paymentUrl`**: they pick the coin and network, then see the address, exact amount, QR code and live status. Add `?lang=ru|uk|en` to choose the page language. The Back button returns them to `returnUrl`.
 3. **Receive a webhook**: Moonvex signs every event: header `Moonvex-Signature: t=<unix>,v1=<hex>`, where `v1 = HMAC-SHA256(webhook_secret, t + "." + raw_body)`. Compare in constant time and reject old timestamps.
 4. **Mark the order paid once** on `payment.confirmed` / `payment.overpaid`: store the event id with a unique constraint; deliveries are retried for up to three days. Ignore `payment.cancelled` while the checkout is open: it means the customer switched coins.
 
-**Amounts:** payments start at **$1** on every network. Payouts (`POST /v1/payouts`) carry your percentage plus a fixed network charge (`fee.network`) and have a minimum per coin/network for what the recipient gets (for example 10 USDT on TRON, 5 on BSC/TON/Solana): below it the API returns `AMOUNT_BELOW_MIN_PAYOUT` with `details.minAmount`. Check with `GET /v1/payouts/quote` first.
+**Amounts:** payments start at **$1** on every network. Payouts (`POST /v1/payouts`) work in every enabled coin, native ETH, BNB, TRX, TON and SOL included, each from its own coin/network balance. A payout carries your percentage plus a fixed network charge (`fee.network`) and has a minimum per coin/network for what the recipient gets; below it the API returns `AMOUNT_BELOW_MIN_PAYOUT` with `details.minAmount`. Check with `GET /v1/payouts/quote` first.
+
+| Coin / network | Minimum payout | Network charge |
+|---|---|---|
+| USDT TRON | 10 USDT | 2 USDT |
+| USDT/USDC Ethereum | 30 | 3 |
+| USDT/USDC BSC, USDT TON, USDT/USDC Solana | 5 | 0.3 |
+| BTC | 0.0002 BTC | 0.00005 BTC |
+| ETH | 0.01 ETH | 0.001 ETH |
+| BNB (BSC) | 0.01 BNB | 0.0005 BNB |
+| TRX | 30 TRX | 1 TRX |
+| TON | 2 TON | 0.05 TON |
+| SOL | 0.05 SOL | 0.001 SOL |
+
+A payout is sent from your own deposit addresses (where your customers' payments arrived) straight to the recipient in one transfer; Moonvex pays the gas. If the amount is spread over several of your addresses, it is first gathered onto one of them, which takes a few extra minutes.
+
+**Rates:** `GET /v1/rates?assets=BTC,USDT&fiat=USD,EUR,UAH,RUB` returns each coin's price in USD (`price`) and in USD/EUR/UAH/RUB (`prices`), plus a `fiat` block with FX rates (`usdPerUnit`, `unitsPerUsd`).
 
 **Pay without leaving your site:** every payment also returns `qr` (SVG/PNG image URLs), `receiptUrl`, `receiptPdfUrl` and `provider`; `GET /v1/checkouts/{id}` + `POST /v1/checkouts/{id}/select` let the customer pick the coin in your own UI. See [embedded-checkout](./embedded-checkout).
 
-Need a fixed coin? Pass `network` (and `asset` for USD prices): the response is then a payment with its address.
+Need a fixed coin? Pass `network` (and `asset` for fiat prices): the response is then a payment with its address.
 
-Node.js SDK: [`@moonvex/node`](https://www.npmjs.com/package/@moonvex/node) — `moonvex.checkouts.create(...)`, `checkouts.get` / `checkouts.select` (1.6.0+), `withLanguage(url, 'en')`, `verifyWebhook(...)`.
+Node.js SDK: [`@moonvex/node`](https://www.npmjs.com/package/@moonvex/node) — `moonvex.checkouts.create(...)`, `checkouts.get` / `checkouts.select` (1.6.0+), `rates.full(assets, fiat)` with the `FiatCurrency` type (1.7.0+), `withLanguage(url, 'en')`, `verifyWebhook(...)`.
 
 **WooCommerce:** a ready plugin, no code needed: [download](https://moonvex.org/downloads/moonvex-crypto-payments.zip?utm_source=github&utm_medium=repo&utm_campaign=woocommerce) · [setup guide](https://moonvex.org/en/guides/wordpress-woocommerce?utm_source=github&utm_medium=repo&utm_campaign=woocommerce).
 
@@ -48,6 +64,8 @@ Node.js SDK: [`@moonvex/node`](https://www.npmjs.com/package/@moonvex/node) — 
 - Website: https://moonvex.org/en?utm_source=github&utm_medium=repo&utm_campaign=readme
 - API docs: https://moonvex.org/en/docs?utm_source=github&utm_medium=repo&utm_campaign=docs
 - All guides: https://moonvex.org/en/guides?utm_source=github&utm_medium=repo&utm_campaign=readme
+- Support (Telegram): [@moonvex_support](https://t.me/moonvex_support)
+- Bot: [@moonvex_bot](https://t.me/moonvex_bot)
 - Telegram channel (RU): https://t.me/moonvex_news
 - Security: security@moonvex.org
 

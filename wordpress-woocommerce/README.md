@@ -24,7 +24,7 @@ https://your-shop/wp-json/moonvex/v1/webhook
 
 ## 4. Enable Moonvex in WooCommerce
 
-Open WooCommerce → Settings → Payments → Moonvex, tick “Enable”, paste the secret API key and the webhook secret and save. You can also change the method name, the text the customer sees at checkout and the payment window. The store currency (WooCommerce → Settings → General) must be USD or a coin such as USDT; with any other currency the method stays hidden. The plugin works with both the block-based and the classic checkout and is compatible with HPOS.
+Open WooCommerce → Settings → Payments → Moonvex, tick “Enable”, paste the secret API key and the webhook secret and save. You can also change the method name, the text the customer sees at checkout and the payment window. The store currency (WooCommerce → Settings → General) must be USD, EUR, UAH, RUB (plugin 1.1.0+) or a coin such as USDT; fiat prices are converted at a rate locked when the customer picks the coin. With any other currency the method stays hidden. The plugin works with both the block-based and the classic checkout and is compatible with HPOS.
 
 ## 5. How an order gets paid
 
@@ -36,7 +36,7 @@ Moonvex has no test network: everything runs on mainnets. First press “Send te
 
 ## Pitfalls
 
-- If the method does not appear at checkout, check the store currency: only USD or a coin is supported, and with other currencies the method is hidden.
+- If the method does not appear at checkout, check the store currency: USD, EUR, UAH, RUB or a coin is supported (EUR/UAH/RUB from plugin 1.1.0), and with other currencies the method is hidden.
 - Security and caching plugins sometimes lock down /wp-json/. Make sure /wp-json/moonvex/v1/webhook accepts POST requests from outside and is not cached.
 - A customer returning to the store is not proof of payment: the order changes status only after the signed webhook arrives.
 - Refunds are not sent from WooCommerce: send the money back as a payout from the Moonvex dashboard to the customer's address.
@@ -66,3 +66,5 @@ Returning to the store does not confirm payment. The order becomes paid when the
 ---
 
 API reference: https://moonvex.org/en/docs?utm_source=github&utm_medium=repo&utm_campaign=docs · Sign up: https://moonvex.org/en?utm_source=github&utm_medium=repo&utm_campaign=wordpress-woocommerce
+
+Help: Telegram [@moonvex_support](https://t.me/moonvex_support).
