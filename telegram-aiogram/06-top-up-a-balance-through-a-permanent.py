@@ -15,5 +15,5 @@ async def topup(message: Message) -> None:
 # in moonvex_webhook: credit the customer balance once per event id
 if event["type"] == "deposit.confirmed" and await claim_event(request.app["db"], event["id"]):
     d = event["data"]
-    await credit_balance(d["customerId"], d["asset"], d["receivedAmount"])  # your function
-    await bot.send_message(int(d["customerId"]), "Balance topped up: " + d["receivedAmount"] + " " + d["asset"])
+    await credit_balance(d["customerId"], d["asset"], d["netAmount"])  # your function; netAmount = after the Moonvex fee
+    await bot.send_message(int(d["customerId"]), "Balance topped up: " + d["netAmount"] + " " + d["asset"])

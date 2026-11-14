@@ -152,7 +152,7 @@ async def claim_event(db: asyncpg.Pool, event_id: str) -> bool:
 
 ## 6. Top up a balance through a permanent address
 
-If your bot has an internal balance, give each user a permanent deposit address: POST /v1/deposit-addresses with customerId and network. Calling it again returns the same address. Every incoming transfer arrives as a deposit.confirmed event with customerId and receivedAmount; credit it once per event id. The key needs the wallets:write scope.
+If your bot has an internal balance, give each user a permanent deposit address: POST /v1/deposit-addresses with customerId and network. Calling it again returns the same address. Every incoming transfer arrives as a deposit.confirmed event with customerId and netAmount (what reaches your balance after the fee; receivedAmount is the gross transfer); credit netAmount once per event id. The key needs the wallets:write scope.
 
 File: [`06-top-up-a-balance-through-a-permanent.py`](./06-top-up-a-balance-through-a-permanent.py)
 
@@ -174,8 +174,8 @@ async def topup(message: Message) -> None:
 # in moonvex_webhook: credit the customer balance once per event id
 if event["type"] == "deposit.confirmed" and await claim_event(request.app["db"], event["id"]):
     d = event["data"]
-    await credit_balance(d["customerId"], d["asset"], d["receivedAmount"])  # your function
-    await bot.send_message(int(d["customerId"]), "Balance topped up: " + d["receivedAmount"] + " " + d["asset"])
+    await credit_balance(d["customerId"], d["asset"], d["netAmount"])  # your function; netAmount = after the Moonvex fee
+    await bot.send_message(int(d["customerId"]), "Balance topped up: " + d["netAmount"] + " " + d["asset"])
 ```
 
 ## Pitfalls

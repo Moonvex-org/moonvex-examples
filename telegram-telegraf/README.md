@@ -129,7 +129,7 @@ export async function claimEvent(eventId) {
 
 ## 6. Top up a balance through a permanent address
 
-For a bot with an internal balance: moonvex.depositAddresses.create({ customerId, network }) returns a permanent address, the same one on every call. Every incoming transfer arrives as a deposit.confirmed event with customerId and receivedAmount; credit it once per event.id. The key needs the wallets:write scope.
+For a bot with an internal balance: moonvex.depositAddresses.create({ customerId, network }) returns a permanent address, the same one on every call. Every incoming transfer arrives as a deposit.confirmed event with customerId and netAmount (what reaches your balance after the fee; receivedAmount is the gross transfer); credit netAmount once per event.id. The key needs the wallets:write scope.
 
 File: [`06-top-up-a-balance-through-a-permanent.js`](./06-top-up-a-balance-through-a-permanent.js)
 
@@ -144,8 +144,8 @@ bot.command('topup', async (ctx) => {
 // server.js, in the webhook handler: credit once per event.id
 if (event.type === 'deposit.confirmed' && (await claimEvent(event.id))) {
   const d = event.data;
-  await creditBalance(d.customerId, d.asset, d.receivedAmount); // your function
-  await bot.telegram.sendMessage(Number(d.customerId), 'Balance topped up: ' + d.receivedAmount + ' ' + d.asset);
+  await creditBalance(d.customerId, d.asset, d.netAmount); // your function; netAmount = after the Moonvex fee
+  await bot.telegram.sendMessage(Number(d.customerId), 'Balance topped up: ' + d.netAmount + ' ' + d.asset);
 }
 ```
 

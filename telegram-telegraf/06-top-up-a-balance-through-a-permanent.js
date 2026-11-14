@@ -8,6 +8,6 @@ bot.command('topup', async (ctx) => {
 // server.js, in the webhook handler: credit once per event.id
 if (event.type === 'deposit.confirmed' && (await claimEvent(event.id))) {
   const d = event.data;
-  await creditBalance(d.customerId, d.asset, d.receivedAmount); // your function
-  await bot.telegram.sendMessage(Number(d.customerId), 'Balance topped up: ' + d.receivedAmount + ' ' + d.asset);
+  await creditBalance(d.customerId, d.asset, d.netAmount); // your function; netAmount = after the Moonvex fee
+  await bot.telegram.sendMessage(Number(d.customerId), 'Balance topped up: ' + d.netAmount + ' ' + d.asset);
 }
